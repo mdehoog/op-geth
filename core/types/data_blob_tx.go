@@ -431,6 +431,7 @@ func (stx *SignedBlobTx) gasPrice() *big.Int         { return u256ToBig(&stx.Mes
 func (stx *SignedBlobTx) value() *big.Int            { return u256ToBig(&stx.Message.Value) }
 func (stx *SignedBlobTx) nonce() uint64              { return uint64(stx.Message.Nonce) }
 func (stx *SignedBlobTx) to() *common.Address        { return (*common.Address)(stx.Message.To.Address) }
+func (stx *SignedBlobTx) isSystemTx() bool           { return false }
 
 func (stx *SignedBlobTx) rawSignatureValues() (v, r, s *big.Int) {
 	return big.NewInt(int64(stx.Signature.V)), u256ToBig(&stx.Signature.R), u256ToBig(&stx.Signature.S)
