@@ -138,7 +138,7 @@ func newTestWorkerBackend(t *testing.T, chainConfig *params.ChainConfig, engine 
 	}
 	genesis := gspec.MustCommit(db)
 
-	chain, _ := core.NewBlockChain(db, &core.CacheConfig{TrieDirtyDisabled: true}, gspec.Config, engine, vm.Config{}, nil, nil)
+	chain, _ := core.NewBlockChain(db, &core.CacheConfig{TrieDirtyDisabled: true}, &gspec, nil, engine, vm.Config{}, nil, nil)
 	txpool := core.NewTxPool(testTxPoolConfig, chainConfig, chain)
 
 	// Generate a small n-block chain and an uncle block for it
@@ -277,7 +277,7 @@ func testGenerateBlockAndImport(t *testing.T, isClique bool) {
 	// This test chain imports the mined blocks.
 	db2 := rawdb.NewMemoryDatabase()
 	b.genesis.MustCommit(db2)
-	chain, _ := core.NewBlockChain(db2, nil, b.chain.Config(), engine, vm.Config{}, nil, nil)
+	chain, _ := core.NewBlockChain(db2, nil, b.genesis, nil, engine, vm.Config{}, nil, nil)
 	defer chain.Stop()
 
 	// Ignore empty commit here for less noise.
@@ -678,7 +678,7 @@ func testGetSealingWork(t *testing.T, chainConfig *params.ChainConfig, engine co
 
 	// This API should work even when the automatic sealing is not enabled
 	for _, c := range cases {
-		resChan, errChan, _ := w.getSealingBlock(c.parent, timestamp, c.coinbase, c.random, false)
+		resChan, errChan, _ := w.getSealingBlock(c.parent, timestamp, c.coinbase, c.random, false, nil)
 		block := <-resChan
 		err := <-errChan
 		if c.expectErr {
@@ -696,7 +696,7 @@ func testGetSealingWork(t *testing.T, chainConfig *params.ChainConfig, engine co
 	// This API should work even when the automatic sealing is enabled
 	w.start()
 	for _, c := range cases {
-		resChan, errChan, _ := w.getSealingBlock(c.parent, timestamp, c.coinbase, c.random, false)
+		resChan, errChan, _ := w.getSealingBlock(c.parent, timestamp, c.coinbase, c.random, false, nil)
 		block := <-resChan
 		err := <-errChan
 		if c.expectErr {

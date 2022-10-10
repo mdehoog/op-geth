@@ -21,15 +21,22 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/holiman/uint256"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/holiman/uint256"
 )
 
 // emptyCodeHash is used by create to ensure deployment is disallowed to already
 // deployed contract addresses (relevant after the account abstraction).
 var emptyCodeHash = crypto.Keccak256Hash(nil)
+
+type RollupMessage interface {
+	Nonce() uint64
+	RollupDataGas() uint64
+	IsDepositTx() bool
+}
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
@@ -39,6 +46,9 @@ type (
 	// GetHashFunc returns the n'th block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
+	// L1CostFunc is used in the state transition to determine the cost of a rollup message.
+	// Returns nil if there is no cost.
+	L1CostFunc func(blockNum uint64, msg RollupMessage) *big.Int
 )
 
 func (evm *EVM) precompile(addr common.Address) (PrecompiledContract, bool) {
@@ -69,6 +79,8 @@ type BlockContext struct {
 	Transfer TransferFunc
 	// GetHash returns the hash corresponding to n
 	GetHash GetHashFunc
+	// L1CostFunc returns the L1 cost of the rollup message, the function may be nil, or return nil
+	L1CostFunc L1CostFunc
 
 	// Block information
 	Coinbase      common.Address // Provides information for COINBASE

@@ -193,6 +193,7 @@ func (b *LesApiBackend) GetEVM(ctx context.Context, msg core.Message, state *sta
 		excessDataGas = ph.ExcessDataGas
 	}
 	context := core.NewEVMBlockContext(header, excessDataGas, b.eth.blockchain, nil)
+	context.L1CostFunc = core.NewL1CostFunc(b.eth.chainConfig, state)
 	return vm.NewEVM(context, txContext, state, b.eth.chainConfig, *vmConfig), state.Error, nil
 }
 

@@ -518,7 +518,7 @@ func doDocker(cmdline []string) {
 	case env.Branch == "master":
 		tags = []string{"latest"}
 	case strings.HasPrefix(env.Tag, "v1."):
-		tags = []string{"stable", fmt.Sprintf("release-1.%d", params.VersionMinor), "v" + params.Version}
+		tags = []string{"stable", fmt.Sprintf("release-1.%d", params.OPVersionMinor), "v" + params.Version}
 	}
 	// If architecture specific image builds are requested, build and push them
 	if *image {
@@ -982,7 +982,10 @@ func doWindowsInstaller(cmdline []string) {
 	if env.Commit != "" {
 		version[2] += "-" + env.Commit[:8]
 	}
-	installer, _ := filepath.Abs("geth-" + archiveBasename(*arch, params.ArchiveVersion(env.Commit)) + ".exe")
+	installer, err := filepath.Abs("geth-" + archiveBasename(*arch, params.ArchiveVersion(env.Commit)) + ".exe")
+	if err != nil {
+		log.Fatalf("Failed to convert installer file path: %v", err)
+	}
 	build.MustRunCommand("makensis.exe",
 		"/DOUTPUTFILE="+installer,
 		"/DMAJORVERSION="+version[0],

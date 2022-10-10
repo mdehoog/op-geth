@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -259,6 +260,8 @@ type TxPool struct {
 	pendingNonces        *txNoncer      // Pending state tracking virtual nonces
 	currentMaxGas        uint64         // Current gas limit for transaction caps
 	currentExcessDataGas *big.Int       // Current block excess_data_gas
+
+	l1CostFn func(message vm.RollupMessage) *big.Int // Current L1 fee cost function
 
 	locals  *accountSet // Set of local transaction to exempt from eviction rules
 	journal *txJournal  // Journal of local transaction to back up to disk
@@ -600,6 +603,12 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 // This does NOT validate wrap-data of the transaction, other than ensuring the
 // tx completeness and limited size checks.
 func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
+	// No unauthenticated deposits allowed in the transaction pool.
+	// This is for spam protection, not consensus,
+	// as the external engine-API user authenticates deposits.
+	if tx.Type() == types.DepositTxType {
+		return ErrTxTypeNotSupported
+	}
 	// Accept only legacy transactions until EIP-2718/2930 activates.
 	if !pool.eip2718 && tx.Type() != types.LegacyTxType {
 		return ErrTxTypeNotSupported
@@ -656,7 +665,11 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	}
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
-	if pool.currentState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+	cost := tx.Cost()
+	if l1Cost := pool.l1CostFn(tx); l1Cost != nil { // add rollup cost
+		cost = cost.Add(cost, l1Cost)
+	}
+	if pool.currentState.GetBalance(from).Cmp(cost) < 0 {
 		return ErrInsufficientFunds
 	}
 	// Ensure the transaction has more gas than the basic tx fee.
@@ -1384,6 +1397,16 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 						return
 					}
 				}
+				// Do not insert deposit txs back into the pool
+				// (validateTx would still catch it if not filtered, but no need to re-inject in the first place).
+				j := 0
+				for _, tx := range discarded {
+					if tx.Type() != types.DepositTxType {
+						discarded[j] = tx
+						j++
+					}
+				}
+				discarded = discarded[:j]
 				reinject = types.TxDifference(discarded, included)
 			}
 		}
@@ -1402,6 +1425,11 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	pool.currentMaxGas = newHead.GasLimit
 	if newHead.ExcessDataGas != nil {
 		pool.currentExcessDataGas.Set(newHead.ExcessDataGas)
+	}
+
+	costFn := NewL1CostFunc(pool.chainconfig, statedb)
+	pool.l1CostFn = func(message vm.RollupMessage) *big.Int {
+		return costFn(newHead.Number.Uint64(), message)
 	}
 
 	// Inject any transactions discarded due to reorgs
@@ -1437,8 +1465,15 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 			pool.all.Remove(hash)
 		}
 		log.Trace("Removed old queued transactions", "count", len(forwards))
+		balance := pool.currentState.GetBalance(addr)
+		if !list.Empty() {
+			// Reduce the cost-cap by L1 rollup cost of the first tx if necessary. Other txs will get filtered out afterwards.
+			if l1Cost := pool.l1CostFn(list.txs.FirstElement()); l1Cost != nil {
+				balance = new(big.Int).Sub(balance, l1Cost) // negative big int is fine
+			}
+		}
 		// Drop all transactions that are too costly (low balance or out of gas)
-		drops, _ := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas)
+		drops, _ := list.Filter(balance, pool.currentMaxGas)
 		for _, tx := range drops {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
@@ -1634,8 +1669,15 @@ func (pool *TxPool) demoteUnexecutables() {
 			pool.all.Remove(hash)
 			log.Trace("Removed old pending transaction", "hash", hash)
 		}
+		balance := pool.currentState.GetBalance(addr)
+		if !list.Empty() {
+			// Reduce the cost-cap by L1 rollup cost of the first tx if necessary. Other txs will get filtered out afterwards.
+			if l1Cost := pool.l1CostFn(list.txs.FirstElement()); l1Cost != nil {
+				balance = new(big.Int).Sub(balance, l1Cost) // negative big int is fine
+			}
+		}
 		// Drop all transactions that are too costly (low balance or out of gas), and queue any invalids back for later
-		drops, invalids := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas)
+		drops, invalids := list.Filter(balance, pool.currentMaxGas)
 		for _, tx := range drops {
 			hash := tx.Hash()
 			log.Trace("Removed unpayable pending transaction", "hash", hash)

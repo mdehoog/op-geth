@@ -34,11 +34,18 @@ type PayloadAttributesV1 struct {
 	Timestamp             uint64         `json:"timestamp"     gencodec:"required"`
 	Random                common.Hash    `json:"prevRandao"        gencodec:"required"`
 	SuggestedFeeRecipient common.Address `json:"suggestedFeeRecipient"  gencodec:"required"`
+
+	// Transactions is a field for rollups: the transactions list is forced into the block
+	Transactions [][]byte `json:"transactions,omitempty"  gencodec:"optional"`
+	// NoTxPool is a field for rollups: if true, the no transactions are taken out of the tx-pool,
+	// only transactions from the above Transactions list will be included.
+	NoTxPool bool `json:"noTxPool,omitempty" gencodec:"optional"`
 }
 
 // JSON type overrides for PayloadAttributesV1.
 type payloadAttributesMarshaling struct {
-	Timestamp hexutil.Uint64
+	Timestamp    hexutil.Uint64
+	Transactions []hexutil.Bytes
 }
 
 // BlobsBundleV1 holds the blobs of an execution payload, to be retrieved separately
