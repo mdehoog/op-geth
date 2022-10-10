@@ -57,18 +57,17 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // New constructs a new GraphQL service instance.
 func New(stack *node.Node, backend ethapi.Backend, filterSystem *filters.FilterSystem, cors, vhosts []string) error {
-	_, err := newHandler(stack, backend, filterSystem, cors, vhosts)
-	return err
+	return newHandler(stack, backend, filterSystem, cors, vhosts)
 }
 
 // newHandler returns a new `http.Handler` that will answer GraphQL queries.
 // It additionally exports an interactive query browser on the / endpoint.
-func newHandler(stack *node.Node, backend ethapi.Backend, filterSystem *filters.FilterSystem, cors, vhosts []string) (*handler, error) {
+func newHandler(stack *node.Node, backend ethapi.Backend, filterSystem *filters.FilterSystem, cors, vhosts []string) error {
 	q := Resolver{backend, filterSystem}
 
 	s, err := graphql.ParseSchema(schema, &q)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	h := handler{Schema: s}
 	handler := node.NewHTTPHandlerStack(h, cors, vhosts, nil)
@@ -77,5 +76,5 @@ func newHandler(stack *node.Node, backend ethapi.Backend, filterSystem *filters.
 	stack.RegisterHandler("GraphQL", "/graphql", handler)
 	stack.RegisterHandler("GraphQL", "/graphql/", handler)
 
-	return &h, nil
+	return nil
 }
