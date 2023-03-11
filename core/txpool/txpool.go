@@ -652,7 +652,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		cost = cost.Add(cost, l1Cost)
 	}
 	if pool.currentState.GetBalance(from).Cmp(cost) < 0 {
-		return core.ErrInsufficientFunds
+		//return core.ErrInsufficientFunds
 	}
 	// Ensure the transaction has more gas than the basic tx fee.
 	intrGas, err := core.IntrinsicGas(tx.Data(), tx.AccessList(), tx.To() == nil, true, pool.istanbul, pool.shanghai)
@@ -1370,7 +1370,8 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 			}
 		}
 		// Drop all transactions that are too costly (low balance or out of gas)
-		drops, _ := list.Filter(balance, pool.currentMaxGas)
+		//drops, _ := list.Filter(balance, pool.currentMaxGas)
+		var drops types.Transactions
 		for _, tx := range drops {
 			hash := tx.Hash()
 			pool.all.Remove(hash)
