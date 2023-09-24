@@ -101,6 +101,7 @@ const (
 	SELFBALANCE OpCode = 0x47
 	BASEFEE     OpCode = 0x48
 	BLOBHASH    OpCode = 0x49
+	BLOBBASEFEE OpCode = 0x4a
 )
 
 // 0x50 range - 'storage' and execution.
@@ -117,6 +118,9 @@ const (
 	MSIZE    OpCode = 0x59
 	GAS      OpCode = 0x5a
 	JUMPDEST OpCode = 0x5b
+	TLOAD    OpCode = 0x5c
+	TSTORE   OpCode = 0x5d
+	MCOPY    OpCode = 0x5e
 	PUSH0    OpCode = 0x5f
 )
 
@@ -205,12 +209,6 @@ const (
 	LOG4
 )
 
-// 0xb0 range.
-const (
-	TLOAD  OpCode = 0xb3
-	TSTORE OpCode = 0xb4
-)
-
 // 0xf0 range - closures.
 const (
 	CREATE       OpCode = 0xf0
@@ -226,8 +224,7 @@ const (
 	SELFDESTRUCT OpCode = 0xff
 )
 
-// Since the opcodes aren't all in order we can't use a regular slice.
-var opCodeToString = map[OpCode]string{
+var opCodeToString = [256]string{
 	// 0x0 range - arithmetic ops.
 	STOP:       "STOP",
 	ADD:        "ADD",
@@ -290,6 +287,7 @@ var opCodeToString = map[OpCode]string{
 	SELFBALANCE: "SELFBALANCE",
 	BASEFEE:     "BASEFEE",
 	BLOBHASH:    "BLOBHASH",
+	BLOBBASEFEE: "BLOBBASEFEE",
 
 	// 0x50 range - 'storage' and execution.
 	POP:      "POP",
@@ -304,6 +302,9 @@ var opCodeToString = map[OpCode]string{
 	MSIZE:    "MSIZE",
 	GAS:      "GAS",
 	JUMPDEST: "JUMPDEST",
+	TLOAD:    "TLOAD",
+	TSTORE:   "TSTORE",
+	MCOPY:    "MCOPY",
 	PUSH0:    "PUSH0",
 
 	// 0x60 range - pushes.
@@ -383,10 +384,6 @@ var opCodeToString = map[OpCode]string{
 	LOG3: "LOG3",
 	LOG4: "LOG4",
 
-	// 0xb0 range.
-	TLOAD:  "TLOAD",
-	TSTORE: "TSTORE",
-
 	// 0xf0 range - closures.
 	CREATE:       "CREATE",
 	CALL:         "CALL",
@@ -401,12 +398,10 @@ var opCodeToString = map[OpCode]string{
 }
 
 func (op OpCode) String() string {
-	str := opCodeToString[op]
-	if len(str) == 0 {
-		return fmt.Sprintf("opcode %#x not defined", int(op))
+	if s := opCodeToString[op]; s != "" {
+		return s
 	}
-
-	return str
+	return fmt.Sprintf("opcode %#x not defined", int(op))
 }
 
 var stringToOp = map[string]OpCode{
@@ -448,6 +443,7 @@ var stringToOp = map[string]OpCode{
 	"CHAINID":        CHAINID,
 	"BASEFEE":        BASEFEE,
 	"BLOBHASH":       BLOBHASH,
+	"BLOBBASEFEE":    BLOBBASEFEE,
 	"DELEGATECALL":   DELEGATECALL,
 	"STATICCALL":     STATICCALL,
 	"CODESIZE":       CODESIZE,
@@ -477,6 +473,9 @@ var stringToOp = map[string]OpCode{
 	"MSIZE":          MSIZE,
 	"GAS":            GAS,
 	"JUMPDEST":       JUMPDEST,
+	"TLOAD":          TLOAD,
+	"TSTORE":         TSTORE,
+	"MCOPY":          MCOPY,
 	"PUSH0":          PUSH0,
 	"PUSH1":          PUSH1,
 	"PUSH2":          PUSH2,
@@ -547,8 +546,6 @@ var stringToOp = map[string]OpCode{
 	"LOG2":           LOG2,
 	"LOG3":           LOG3,
 	"LOG4":           LOG4,
-	"TLOAD":          TLOAD,
-	"TSTORE":         TSTORE,
 	"CREATE":         CREATE,
 	"CREATE2":        CREATE2,
 	"CALL":           CALL,

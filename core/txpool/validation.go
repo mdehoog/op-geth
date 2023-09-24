@@ -30,6 +30,22 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+// L1 Info Gas Overhead is the amount of gas the the L1 info deposit consumes.
+// It is removed from the tx pool max gas to better indicate that L2 transactions
+// are not able to consume all of the gas in a L2 block as the L1 info deposit is always present.
+const l1InfoGasOverhead = uint64(70_000)
+
+func EffectiveGasLimit(chainConfig *params.ChainConfig, gasLimit uint64) uint64 {
+	if chainConfig.Optimism != nil {
+		if l1InfoGasOverhead < gasLimit {
+			gasLimit -= l1InfoGasOverhead
+		} else {
+			gasLimit = 0
+		}
+	}
+	return gasLimit
+}
+
 // ValidationOptions define certain differences between transaction validation
 // across the different pools without having to duplicate those checks.
 type ValidationOptions struct {
@@ -46,7 +62,13 @@ type ValidationOptions struct {
 //
 // This check is public to allow different transaction pools to check the basic
 // rules without duplicating code and running the risk of missed updates.
-func ValidateTransaction(tx *types.Transaction, blobs []kzg4844.Blob, commits []kzg4844.Commitment, proofs []kzg4844.Proof, head *types.Header, signer types.Signer, opts *ValidationOptions) error {
+func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types.Signer, opts *ValidationOptions) error {
+	// No unauthenticated deposits allowed in the transaction pool.
+	// This is for spam protection, not consensus,
+	// as the external engine-API user authenticates deposits.
+	if tx.Type() == types.DepositTxType {
+		return core.ErrTxTypeNotSupported
+	}
 	// Ensure transactions not implemented by the calling pool are rejected
 	if opts.Accept&(1<<tx.Type()) == 0 {
 		return fmt.Errorf("%w: tx type %v not supported by this pool", core.ErrTxTypeNotSupported, tx.Type())
@@ -76,7 +98,7 @@ func ValidateTransaction(tx *types.Transaction, blobs []kzg4844.Blob, commits []
 		return ErrNegativeValue
 	}
 	// Ensure the transaction doesn't exceed the current block limit gas
-	if head.GasLimit < tx.Gas() {
+	if EffectiveGasLimit(opts.Config, head.GasLimit) < tx.Gas() {
 		return ErrGasLimit
 	}
 	// Sanity check for extremely large numbers (supported by RLP or RPC)
@@ -110,46 +132,57 @@ func ValidateTransaction(tx *types.Transaction, blobs []kzg4844.Blob, commits []
 	}
 	// Ensure blob transactions have valid commitments
 	if tx.Type() == types.BlobTxType {
-		// Ensure the number of items in the blob transaction and vairous side
+		sidecar := tx.BlobTxSidecar()
+		if sidecar == nil {
+			return fmt.Errorf("missing sidecar in blob transaction")
+		}
+		// Ensure the number of items in the blob transaction and various side
 		// data match up before doing any expensive validations
 		hashes := tx.BlobHashes()
 		if len(hashes) == 0 {
 			return fmt.Errorf("blobless blob transaction")
 		}
-		if len(hashes) > params.BlobTxMaxDataGasPerBlock/params.BlobTxDataGasPerBlob {
-			return fmt.Errorf("too many blobs in transaction: have %d, permitted %d", len(hashes), params.BlobTxMaxDataGasPerBlock/params.BlobTxDataGasPerBlob)
+		if len(hashes) > params.MaxBlobGasPerBlock/params.BlobTxBlobGasPerBlob {
+			return fmt.Errorf("too many blobs in transaction: have %d, permitted %d", len(hashes), params.MaxBlobGasPerBlock/params.BlobTxBlobGasPerBlob)
 		}
-		if len(blobs) != len(hashes) {
-			return fmt.Errorf("invalid number of %d blobs compared to %d blob hashes", len(blobs), len(hashes))
+		if err := validateBlobSidecar(hashes, sidecar); err != nil {
+			return err
 		}
-		if len(commits) != len(hashes) {
-			return fmt.Errorf("invalid number of %d blob commitments compared to %d blob hashes", len(commits), len(hashes))
-		}
-		if len(proofs) != len(hashes) {
-			return fmt.Errorf("invalid number of %d blob proofs compared to %d blob hashes", len(proofs), len(hashes))
-		}
-		// Blob quantities match up, validate that the provers match with the
-		// transaction hash before getting to the cryptography
-		hasher := sha256.New()
-		for i, want := range hashes {
-			hasher.Write(commits[i][:])
-			hash := hasher.Sum(nil)
-			hasher.Reset()
+	}
+	return nil
+}
 
-			var vhash common.Hash
-			vhash[0] = params.BlobTxHashVersion
-			copy(vhash[1:], hash[1:])
+func validateBlobSidecar(hashes []common.Hash, sidecar *types.BlobTxSidecar) error {
+	if len(sidecar.Blobs) != len(hashes) {
+		return fmt.Errorf("invalid number of %d blobs compared to %d blob hashes", len(sidecar.Blobs), len(hashes))
+	}
+	if len(sidecar.Commitments) != len(hashes) {
+		return fmt.Errorf("invalid number of %d blob commitments compared to %d blob hashes", len(sidecar.Commitments), len(hashes))
+	}
+	if len(sidecar.Proofs) != len(hashes) {
+		return fmt.Errorf("invalid number of %d blob proofs compared to %d blob hashes", len(sidecar.Proofs), len(hashes))
+	}
+	// Blob quantities match up, validate that the provers match with the
+	// transaction hash before getting to the cryptography
+	hasher := sha256.New()
+	for i, want := range hashes {
+		hasher.Write(sidecar.Commitments[i][:])
+		hash := hasher.Sum(nil)
+		hasher.Reset()
 
-			if vhash != want {
-				return fmt.Errorf("blob %d: computed hash %#x mismatches transaction one %#x", i, vhash, want)
-			}
+		var vhash common.Hash
+		vhash[0] = params.BlobTxHashVersion
+		copy(vhash[1:], hash[1:])
+
+		if vhash != want {
+			return fmt.Errorf("blob %d: computed hash %#x mismatches transaction one %#x", i, vhash, want)
 		}
-		// Blob commitments match with the hashes in the transaction, verify the
-		// blobs themselves via KZG
-		for i := range blobs {
-			if err := kzg4844.VerifyBlobProof(blobs[i], commits[i], proofs[i]); err != nil {
-				return fmt.Errorf("invalid blob %d: %v", i, err)
-			}
+	}
+	// Blob commitments match with the hashes in the transaction, verify the
+	// blobs themselves via KZG
+	for i := range sidecar.Blobs {
+		if err := kzg4844.VerifyBlobProof(sidecar.Blobs[i], sidecar.Commitments[i], sidecar.Proofs[i]); err != nil {
+			return fmt.Errorf("invalid blob %d: %v", i, err)
 		}
 	}
 	return nil
@@ -166,13 +199,21 @@ type ValidationOptionsWithState struct {
 	// nonce gaps will be ignored and permitted.
 	FirstNonceGap func(addr common.Address) uint64
 
-	// ExistingExpenditure is a mandatory callback to retrieve the cummulative
+	// UsedAndLeftSlots is a mandatory callback to retrieve the number of tx slots
+	// used and the number still permitted for an account. New transactions will
+	// be rejected once the number of remaining slots reaches zero.
+	UsedAndLeftSlots func(addr common.Address) (int, int)
+
+	// ExistingExpenditure is a mandatory callback to retrieve the cumulative
 	// cost of the already pooled transactions to check for overdrafts.
 	ExistingExpenditure func(addr common.Address) *big.Int
 
 	// ExistingCost is a mandatory callback to retrieve an already pooled
 	// transaction's cost with the given nonce to check for overdrafts.
 	ExistingCost func(addr common.Address, nonce uint64) *big.Int
+
+	// L1CostFn is an optional extension, to validate L1 rollup costs of a tx
+	L1CostFn L1CostFunc
 }
 
 // ValidateTransactionWithState is a helper method to check whether a transaction
@@ -203,6 +244,11 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		balance = opts.State.GetBalance(from)
 		cost    = tx.Cost()
 	)
+	if opts.L1CostFn != nil {
+		if l1Cost := opts.L1CostFn(tx.RollupDataGas()); l1Cost != nil { // add rollup cost
+			cost = cost.Add(cost, l1Cost)
+		}
+	}
 	if balance.Cmp(cost) < 0 {
 		return fmt.Errorf("%w: balance %v, tx cost %v, overshot %v", core.ErrInsufficientFunds, balance, cost, new(big.Int).Sub(cost, balance))
 	}
@@ -219,6 +265,12 @@ func ValidateTransactionWithState(tx *types.Transaction, signer types.Signer, op
 		need := new(big.Int).Add(spent, cost)
 		if balance.Cmp(need) < 0 {
 			return fmt.Errorf("%w: balance %v, queued cost %v, tx cost %v, overshot %v", core.ErrInsufficientFunds, balance, spent, cost, new(big.Int).Sub(need, balance))
+		}
+		// Transaction takes a new nonce value out of the pool. Ensure it doesn't
+		// overflow the number of permitted transactions from a single account
+		// (i.e. max cancellable via out-of-bound transaction).
+		if used, left := opts.UsedAndLeftSlots(from); left <= 0 {
+			return fmt.Errorf("%w: pooled %d txs", ErrAccountLimitExceeded, used)
 		}
 	}
 	return nil

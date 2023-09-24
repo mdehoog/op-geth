@@ -57,7 +57,6 @@ func (b *LesApiBackend) CurrentBlock() *types.Header {
 }
 
 func (b *LesApiBackend) SetHead(number uint64) {
-	b.eth.handler.downloader.Cancel()
 	b.eth.blockchain.SetHead(number)
 }
 
@@ -189,7 +188,7 @@ func (b *LesApiBackend) GetEVM(ctx context.Context, msg *core.Message, state *st
 		vmConfig = new(vm.Config)
 	}
 	txContext := core.NewEVMTxContext(msg)
-	context := core.NewEVMBlockContext(header, b.eth.blockchain, nil)
+	context := core.NewEVMBlockContext(header, b.eth.blockchain, nil, b.eth.chainConfig, state)
 	if blockCtx != nil {
 		context = *blockCtx
 	}
@@ -224,11 +223,11 @@ func (b *LesApiBackend) Stats() (pending int, queued int) {
 	return b.eth.txPool.Stats(), 0
 }
 
-func (b *LesApiBackend) TxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
+func (b *LesApiBackend) TxPoolContent() (map[common.Address][]*types.Transaction, map[common.Address][]*types.Transaction) {
 	return b.eth.txPool.Content()
 }
 
-func (b *LesApiBackend) TxPoolContentFrom(addr common.Address) (types.Transactions, types.Transactions) {
+func (b *LesApiBackend) TxPoolContentFrom(addr common.Address) ([]*types.Transaction, []*types.Transaction) {
 	return b.eth.txPool.ContentFrom(addr)
 }
 
@@ -264,7 +263,7 @@ func (b *LesApiBackend) SubscribeRemovedLogsEvent(ch chan<- core.RemovedLogsEven
 }
 
 func (b *LesApiBackend) SyncProgress() ethereum.SyncProgress {
-	return b.eth.Downloader().Progress()
+	return ethereum.SyncProgress{}
 }
 
 func (b *LesApiBackend) ProtocolVersion() int {
@@ -335,4 +334,12 @@ func (b *LesApiBackend) StateAtBlock(ctx context.Context, block *types.Block, re
 
 func (b *LesApiBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*core.Message, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	return b.eth.stateAtTransaction(ctx, block, txIndex, reexec)
+}
+
+func (b *LesApiBackend) HistoricalRPCService() *rpc.Client {
+	return b.eth.historicalRPCService
+}
+
+func (b *LesApiBackend) Genesis() *types.Block {
+	return b.eth.blockchain.Genesis()
 }

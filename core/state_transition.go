@@ -17,6 +17,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -125,38 +126,50 @@ func toWordSize(size uint64) uint64 {
 // A Message contains the data derived from a single transaction that is relevant to state
 // processing.
 type Message struct {
-	To         *common.Address
-	From       common.Address
-	Nonce      uint64
-	Value      *big.Int
-	GasLimit   uint64
-	GasPrice   *big.Int
-	GasFeeCap  *big.Int
-	GasTipCap  *big.Int
-	Data       []byte
-	AccessList types.AccessList
-	BlobHashes []common.Hash
+	To            *common.Address
+	From          common.Address
+	Nonce         uint64
+	Value         *big.Int
+	GasLimit      uint64
+	GasPrice      *big.Int
+	GasFeeCap     *big.Int
+	GasTipCap     *big.Int
+	Data          []byte
+	AccessList    types.AccessList
+	BlobGasFeeCap *big.Int
+	BlobHashes    []common.Hash
 
 	// When SkipAccountChecks is true, the message nonce is not checked against the
 	// account nonce in state. It also disables checking that the sender is an EOA.
 	// This field will be set to true for operations like RPC eth_call.
 	SkipAccountChecks bool
+
+	IsSystemTx    bool                // IsSystemTx indicates the message, if also a deposit, does not emit gas usage.
+	IsDepositTx   bool                // IsDepositTx indicates the message is force-included and can persist a mint.
+	Mint          *big.Int            // Mint is the amount to mint before EVM processing, or nil if there is no minting.
+	RollupDataGas types.RollupGasData // RollupDataGas indicates the rollup cost of the message, 0 if not a rollup or no cost.
 }
 
 // TransactionToMessage converts a transaction into a Message.
 func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.Int) (*Message, error) {
 	msg := &Message{
-		Nonce:             tx.Nonce(),
-		GasLimit:          tx.Gas(),
-		GasPrice:          new(big.Int).Set(tx.GasPrice()),
-		GasFeeCap:         new(big.Int).Set(tx.GasFeeCap()),
-		GasTipCap:         new(big.Int).Set(tx.GasTipCap()),
-		To:                tx.To(),
-		Value:             tx.Value(),
-		Data:              tx.Data(),
-		AccessList:        tx.AccessList(),
+		Nonce:         tx.Nonce(),
+		GasLimit:      tx.Gas(),
+		GasPrice:      new(big.Int).Set(tx.GasPrice()),
+		GasFeeCap:     new(big.Int).Set(tx.GasFeeCap()),
+		GasTipCap:     new(big.Int).Set(tx.GasTipCap()),
+		To:            tx.To(),
+		Value:         tx.Value(),
+		Data:          tx.Data(),
+		AccessList:    tx.AccessList(),
+		IsSystemTx:    tx.IsSystemTx(),
+		IsDepositTx:   tx.IsDepositTx(),
+		Mint:          tx.Mint(),
+		RollupDataGas: tx.RollupDataGas(),
+
 		SkipAccountChecks: false,
 		BlobHashes:        tx.BlobHashes(),
+		BlobGasFeeCap:     tx.BlobGasFeeCap(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
@@ -230,11 +243,33 @@ func (st *StateTransition) to() common.Address {
 func (st *StateTransition) buyGas() error {
 	mgval := new(big.Int).SetUint64(st.msg.GasLimit)
 	mgval = mgval.Mul(mgval, st.msg.GasPrice)
-	balanceCheck := mgval
+	var l1Cost *big.Int
+	if st.evm.Context.L1CostFunc != nil && !st.msg.SkipAccountChecks {
+		l1Cost = st.evm.Context.L1CostFunc(st.evm.Context.BlockNumber.Uint64(), st.evm.Context.Time, st.msg.RollupDataGas, st.msg.IsDepositTx)
+	}
+	if l1Cost != nil {
+		mgval = mgval.Add(mgval, l1Cost)
+	}
+	balanceCheck := new(big.Int).Set(mgval)
 	if st.msg.GasFeeCap != nil {
-		balanceCheck = new(big.Int).SetUint64(st.msg.GasLimit)
+		balanceCheck.SetUint64(st.msg.GasLimit)
 		balanceCheck = balanceCheck.Mul(balanceCheck, st.msg.GasFeeCap)
 		balanceCheck.Add(balanceCheck, st.msg.Value)
+		if l1Cost != nil {
+			balanceCheck.Add(balanceCheck, l1Cost)
+		}
+	}
+	if st.evm.ChainConfig().IsCancun(st.evm.Context.BlockNumber, st.evm.Context.Time) {
+		if blobGas := st.blobGasUsed(); blobGas > 0 {
+			// Check that the user has enough funds to cover blobGasUsed * tx.BlobGasFeeCap
+			blobBalanceCheck := new(big.Int).SetUint64(blobGas)
+			blobBalanceCheck.Mul(blobBalanceCheck, st.msg.BlobGasFeeCap)
+			balanceCheck.Add(balanceCheck, blobBalanceCheck)
+			// Pay for blobGasUsed * actual blob fee
+			blobFee := new(big.Int).SetUint64(blobGas)
+			blobFee.Mul(blobFee, st.evm.Context.BlobBaseFee)
+			mgval.Add(mgval, blobFee)
+		}
 	}
 	if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
 		return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
@@ -250,6 +285,21 @@ func (st *StateTransition) buyGas() error {
 }
 
 func (st *StateTransition) preCheck() error {
+	if st.msg.IsDepositTx {
+		// No fee fields to check, no nonce to check, and no need to check if EOA (L1 already verified it for us)
+		// Gas is free, but no refunds!
+		st.initialGas = st.msg.GasLimit
+		st.gasRemaining += st.msg.GasLimit // Add gas here in order to be able to execute calls.
+		// Don't touch the gas pool for system transactions
+		if st.msg.IsSystemTx {
+			if st.evm.ChainConfig().IsOptimismRegolith(st.evm.Context.Time) {
+				return fmt.Errorf("%w: address %v", ErrSystemTxNotSupported,
+					st.msg.From.Hex())
+			}
+			return nil
+		}
+		return st.gp.SubGas(st.msg.GasLimit) // gas used by deposits may not be used by other txs
+	}
 	// Only check transactions that are not fake
 	msg := st.msg
 	if !msg.SkipAccountChecks {
@@ -272,11 +322,11 @@ func (st *StateTransition) preCheck() error {
 				msg.From.Hex(), codeHash)
 		}
 	}
-
 	// Make sure that transaction gasFeeCap is greater than the baseFee (post london)
 	if st.evm.ChainConfig().IsLondon(st.evm.Context.BlockNumber) {
 		// Skip the checks if gas fields are zero and baseFee was explicitly disabled (eth_call)
-		if !st.evm.Config.NoBaseFee || msg.GasFeeCap.BitLen() > 0 || msg.GasTipCap.BitLen() > 0 {
+		skipCheck := st.evm.Config.NoBaseFee && msg.GasFeeCap.BitLen() == 0 && msg.GasTipCap.BitLen() == 0
+		if !skipCheck {
 			if l := msg.GasFeeCap.BitLen(); l > 256 {
 				return fmt.Errorf("%w: address %v, maxFeePerGas bit length: %d", ErrFeeCapVeryHigh,
 					msg.From.Hex(), l)
@@ -292,8 +342,35 @@ func (st *StateTransition) preCheck() error {
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
 			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 {
-				return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", ErrFeeCapTooLow,
+				return fmt.Errorf("%w: address %v, maxFeePerGas: %s, baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
+			}
+		}
+	}
+	// Check the blob version validity
+	if msg.BlobHashes != nil {
+		if len(msg.BlobHashes) == 0 {
+			return errors.New("blob transaction missing blob hashes")
+		}
+		for i, hash := range msg.BlobHashes {
+			if hash[0] != params.BlobTxHashVersion {
+				return fmt.Errorf("blob %d hash version mismatch (have %d, supported %d)",
+					i, hash[0], params.BlobTxHashVersion)
+			}
+		}
+	}
+	// Check that the user is paying at least the current blob fee
+	if st.evm.ChainConfig().IsCancun(st.evm.Context.BlockNumber, st.evm.Context.Time) {
+		if st.blobGasUsed() > 0 {
+			// Skip the checks if gas fields are zero and blobBaseFee was explicitly disabled (eth_call)
+			skipCheck := st.evm.Config.NoBaseFee && msg.BlobGasFeeCap.BitLen() == 0
+			if !skipCheck {
+				// This will panic if blobBaseFee is nil, but blobBaseFee presence
+				// is verified as part of header validation.
+				if msg.BlobGasFeeCap.Cmp(st.evm.Context.BlobBaseFee) < 0 {
+					return fmt.Errorf("%w: address %v blobGasFeeCap: %v, blobBaseFee: %v", ErrBlobFeeCapTooLow,
+						msg.From.Hex(), msg.BlobGasFeeCap, st.evm.Context.BlobBaseFee)
+				}
 			}
 		}
 	}
@@ -311,6 +388,37 @@ func (st *StateTransition) preCheck() error {
 // However if any consensus issue encountered, return the error directly with
 // nil evm execution result.
 func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
+	if mint := st.msg.Mint; mint != nil {
+		st.state.AddBalance(st.msg.From, mint)
+	}
+	snap := st.state.Snapshot()
+
+	result, err := st.innerTransitionDb()
+	// Failed deposits must still be included. Unless we cannot produce the block at all due to the gas limit.
+	// On deposit failure, we rewind any state changes from after the minting, and increment the nonce.
+	if err != nil && err != ErrGasLimitReached && st.msg.IsDepositTx {
+		st.state.RevertToSnapshot(snap)
+		// Even though we revert the state changes, always increment the nonce for the next deposit transaction
+		st.state.SetNonce(st.msg.From, st.state.GetNonce(st.msg.From)+1)
+		// Record deposits as using all their gas (matches the gas pool)
+		// System Transactions are special & are not recorded as using any gas (anywhere)
+		// Regolith changes this behaviour so the actual gas used is reported.
+		// In this case the tx is invalid so is recorded as using all gas.
+		gasUsed := st.msg.GasLimit
+		if st.msg.IsSystemTx && !st.evm.ChainConfig().IsRegolith(st.evm.Context.Time) {
+			gasUsed = 0
+		}
+		result = &ExecutionResult{
+			UsedGas:    gasUsed,
+			Err:        fmt.Errorf("failed deposit: %w", err),
+			ReturnData: nil,
+		}
+		err = nil
+	}
+	return result, err
+}
+
+func (st *StateTransition) innerTransitionDb() (*ExecutionResult, error) {
 	// First check this message satisfies all consensus rules before
 	// applying the message. The rules include these clauses
 	//
@@ -377,12 +485,38 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		ret, st.gasRemaining, vmerr = st.evm.Call(sender, st.to(), msg.Data, st.gasRemaining, msg.Value)
 	}
 
+	// if deposit: skip refunds, skip tipping coinbase
+	// Regolith changes this behaviour to report the actual gasUsed instead of always reporting all gas used.
+	if st.msg.IsDepositTx && !rules.IsOptimismRegolith {
+		// Record deposits as using all their gas (matches the gas pool)
+		// System Transactions are special & are not recorded as using any gas (anywhere)
+		gasUsed := st.msg.GasLimit
+		if st.msg.IsSystemTx {
+			gasUsed = 0
+		}
+		return &ExecutionResult{
+			UsedGas:    gasUsed,
+			Err:        vmerr,
+			ReturnData: ret,
+		}, nil
+	}
+	// Note for deposit tx there is no ETH refunded for unused gas, but that's taken care of by the fact that gasPrice
+	// is always 0 for deposit tx. So calling refundGas will ensure the gasUsed accounting is correct without actually
+	// changing the sender's balance
 	if !rules.IsLondon {
 		// Before EIP-3529: refunds were capped to gasUsed / 2
 		st.refundGas(params.RefundQuotient)
 	} else {
 		// After EIP-3529: refunds are capped to gasUsed / 5
 		st.refundGas(params.RefundQuotientEIP3529)
+	}
+	if st.msg.IsDepositTx && rules.IsOptimismRegolith {
+		// Skip coinbase payments for deposit tx in Regolith
+		return &ExecutionResult{
+			UsedGas:    st.gasUsed(),
+			Err:        vmerr,
+			ReturnData: ret,
+		}, nil
 	}
 	effectiveTip := msg.GasPrice
 	if rules.IsLondon {
@@ -397,6 +531,15 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		fee := new(big.Int).SetUint64(st.gasUsed())
 		fee.Mul(fee, effectiveTip)
 		st.state.AddBalance(st.evm.Context.Coinbase, fee)
+	}
+
+	// Check that we are post bedrock to enable op-geth to be able to create pseudo pre-bedrock blocks (these are pre-bedrock, but don't follow l2 geth rules)
+	// Note optimismConfig will not be nil if rules.IsOptimismBedrock is true
+	if optimismConfig := st.evm.ChainConfig().Optimism; optimismConfig != nil && rules.IsOptimismBedrock {
+		st.state.AddBalance(params.OptimismBaseFeeRecipient, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.evm.Context.BaseFee))
+		if cost := st.evm.Context.L1CostFunc(st.evm.Context.BlockNumber.Uint64(), st.evm.Context.Time, st.msg.RollupDataGas, st.msg.IsDepositTx); cost != nil {
+			st.state.AddBalance(params.OptimismL1FeeRecipient, cost)
+		}
 	}
 
 	return &ExecutionResult{
@@ -426,4 +569,9 @@ func (st *StateTransition) refundGas(refundQuotient uint64) {
 // gasUsed returns the amount of gas used up by the state transition.
 func (st *StateTransition) gasUsed() uint64 {
 	return st.initialGas - st.gasRemaining
+}
+
+// blobGasUsed returns the amount of blob gas used by the message.
+func (st *StateTransition) blobGasUsed() uint64 {
+	return uint64(len(st.msg.BlobHashes) * params.BlobTxBlobGasPerBlob)
 }

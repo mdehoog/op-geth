@@ -16,6 +16,10 @@
 
 package les
 
+// Note: these tests are disabled now because they cannot work with the old sync
+// mechanism removed but will be useful again once the PoS ultralight mode is implemented
+
+/*
 import (
 	"bytes"
 	"context"
@@ -100,7 +104,7 @@ func odrAccounts(ctx context.Context, db ethdb.Database, config *params.ChainCon
 	for _, addr := range acc {
 		if bc != nil {
 			header := bc.GetHeaderByHash(bhash)
-			st, err = state.New(header.Root, state.NewDatabase(db), nil)
+			st, err = state.New(header.Root, bc.StateCache(), nil)
 		} else {
 			header := lc.GetHeaderByHash(bhash)
 			st = light.NewState(ctx, header, lc.Odr())
@@ -144,7 +148,7 @@ func odrContractCall(ctx context.Context, db ethdb.Database, config *params.Chai
 					SkipAccountChecks: true,
 				}
 
-				context := core.NewEVMBlockContext(header, bc, nil)
+				context := core.NewEVMBlockContext(header, bc, nil, config, statedb)
 				txContext := core.NewEVMTxContext(msg)
 				vmenv := vm.NewEVM(context, txContext, statedb, config, vm.Config{NoBaseFee: true})
 
@@ -168,7 +172,7 @@ func odrContractCall(ctx context.Context, db ethdb.Database, config *params.Chai
 				Data:              data,
 				SkipAccountChecks: true,
 			}
-			context := core.NewEVMBlockContext(header, lc, nil)
+			context := core.NewEVMBlockContext(header, lc, nil, config, state)
 			txContext := core.NewEVMTxContext(msg)
 			vmenv := vm.NewEVM(context, txContext, state, config, vm.Config{NoBaseFee: true})
 			gp := new(core.GasPool).AddGas(math.MaxUint64)
@@ -451,3 +455,4 @@ func randomHash() common.Hash {
 	}
 	return hash
 }
+*/
