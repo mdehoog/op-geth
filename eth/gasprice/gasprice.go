@@ -19,7 +19,6 @@ package gasprice
 import (
 	"context"
 	"math/big"
-	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -30,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/exp/slices"
 )
 
 const sampleNumber = 3 // Number of transactions sampled in a block
@@ -37,6 +37,8 @@ const sampleNumber = 3 // Number of transactions sampled in a block
 var (
 	DefaultMaxPrice    = big.NewInt(500 * params.GWei)
 	DefaultIgnorePrice = big.NewInt(2 * params.Wei)
+
+	DefaultMinSuggestedPriorityFee = big.NewInt(1e6 * params.Wei) // 0.001 gwei, for Optimism fee suggestion
 )
 
 type Config struct {
@@ -47,6 +49,8 @@ type Config struct {
 	Default          *big.Int `toml:",omitempty"`
 	MaxPrice         *big.Int `toml:",omitempty"`
 	IgnorePrice      *big.Int `toml:",omitempty"`
+
+	MinSuggestedPriorityFee *big.Int `toml:",omitempty"` // for Optimism fee suggestion
 }
 
 // OracleBackend includes all necessary background APIs for oracle.
@@ -74,6 +78,8 @@ type Oracle struct {
 	maxHeaderHistory, maxBlockHistory uint64
 
 	historyCache *lru.Cache[cacheKey, processedFees]
+
+	minSuggestedPriorityFee *big.Int // for Optimism fee suggestion
 }
 
 // NewOracle returns a new gasprice oracle which can recommend suitable
@@ -128,7 +134,7 @@ func NewOracle(backend OracleBackend, params Config) *Oracle {
 		}
 	}()
 
-	return &Oracle{
+	r := &Oracle{
 		backend:          backend,
 		lastPrice:        params.Default,
 		maxPrice:         maxPrice,
@@ -139,6 +145,17 @@ func NewOracle(backend OracleBackend, params Config) *Oracle {
 		maxBlockHistory:  maxBlockHistory,
 		historyCache:     cache,
 	}
+
+	if backend.ChainConfig().IsOptimism() {
+		r.minSuggestedPriorityFee = params.MinSuggestedPriorityFee
+		if r.minSuggestedPriorityFee == nil || r.minSuggestedPriorityFee.Int64() <= 0 {
+			r.minSuggestedPriorityFee = DefaultMinSuggestedPriorityFee
+			log.Warn("Sanitizing invalid optimism gasprice oracle min priority fee suggestion",
+				"provided", params.MinSuggestedPriorityFee,
+				"updated", r.minSuggestedPriorityFee)
+		}
+	}
+	return r
 }
 
 // SuggestTipCap returns a tip cap so that newly created transaction can have a
@@ -168,6 +185,11 @@ func (oracle *Oracle) SuggestTipCap(ctx context.Context) (*big.Int, error) {
 	if headHash == lastHead {
 		return new(big.Int).Set(lastPrice), nil
 	}
+
+	if oracle.backend.ChainConfig().IsOptimism() {
+		return oracle.SuggestOptimismPriorityFee(ctx, head, headHash), nil
+	}
+
 	var (
 		sent, exp int
 		number    = head.Number.Uint64()
@@ -208,7 +230,7 @@ func (oracle *Oracle) SuggestTipCap(ctx context.Context) (*big.Int, error) {
 	}
 	price := lastPrice
 	if len(results) > 0 {
-		sort.Sort(bigIntArray(results))
+		slices.SortFunc(results, func(a, b *big.Int) int { return a.Cmp(b) })
 		price = results[(len(results)-1)*oracle.percentile/100]
 	}
 	if price.Cmp(oracle.maxPrice) > 0 {
@@ -227,30 +249,6 @@ type results struct {
 	err    error
 }
 
-type txSorter struct {
-	txs     []*types.Transaction
-	baseFee *big.Int
-}
-
-func newSorter(txs []*types.Transaction, baseFee *big.Int) *txSorter {
-	return &txSorter{
-		txs:     txs,
-		baseFee: baseFee,
-	}
-}
-
-func (s *txSorter) Len() int { return len(s.txs) }
-func (s *txSorter) Swap(i, j int) {
-	s.txs[i], s.txs[j] = s.txs[j], s.txs[i]
-}
-func (s *txSorter) Less(i, j int) bool {
-	// It's okay to discard the error because a tx would never be
-	// accepted into a block with an invalid effective tip.
-	tip1, _ := s.txs[i].EffectiveGasTip(s.baseFee)
-	tip2, _ := s.txs[j].EffectiveGasTip(s.baseFee)
-	return tip1.Cmp(tip2) < 0
-}
-
 // getBlockValues calculates the lowest transaction gas price in a given block
 // and sends it to the result channel. If the block is empty or all transactions
 // are sent by the miner itself(it doesn't make any sense to include this kind of
@@ -267,14 +265,21 @@ func (oracle *Oracle) getBlockValues(ctx context.Context, blockNum uint64, limit
 	signer := types.MakeSigner(oracle.backend.ChainConfig(), block.Number(), block.Time())
 
 	// Sort the transaction by effective tip in ascending sort.
-	txs := make([]*types.Transaction, len(block.Transactions()))
-	copy(txs, block.Transactions())
-	sorter := newSorter(txs, block.BaseFee())
-	sort.Sort(sorter)
+	txs := block.Transactions()
+	sortedTxs := make([]*types.Transaction, len(txs))
+	copy(sortedTxs, txs)
+	baseFee := block.BaseFee()
+	slices.SortFunc(sortedTxs, func(a, b *types.Transaction) int {
+		// It's okay to discard the error because a tx would never be
+		// accepted into a block with an invalid effective tip.
+		tip1, _ := a.EffectiveGasTip(baseFee)
+		tip2, _ := b.EffectiveGasTip(baseFee)
+		return tip1.Cmp(tip2)
+	})
 
 	var prices []*big.Int
-	for _, tx := range sorter.txs {
-		tip, _ := tx.EffectiveGasTip(block.BaseFee())
+	for _, tx := range sortedTxs {
+		tip, _ := tx.EffectiveGasTip(baseFee)
 		if ignoreUnder != nil && tip.Cmp(ignoreUnder) == -1 {
 			continue
 		}

@@ -23,7 +23,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/consensus/misc"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -57,6 +58,7 @@ var (
 // is only used for necessary consensus checks. The legacy consensus engine can be any
 // engine implements the consensus interface (except the beacon itself).
 type Beacon struct {
+	// For migrated OP chains (OP mainnet, OP Goerli), ethone is a dummy legacy pre-Bedrock consensus
 	ethone consensus.Engine // Original consensus engine used in eth1, e.g. ethash or clique
 }
 
@@ -104,12 +106,27 @@ func errOut(n int, err error) chan error {
 	return errs
 }
 
+// OP-Stack Bedrock variant of splitHeaders: the total-terminal difficulty is terminated at bedrock transition, but also reset to 0.
+// So just use the bedrock fork check to split the headers, to simplify the splitting.
+// The returned slices are slices over the input. The input must be sorted.
+func (beacon *Beacon) splitBedrockHeaders(chain consensus.ChainHeaderReader, headers []*types.Header) ([]*types.Header, []*types.Header, error) {
+	for i, h := range headers {
+		if chain.Config().IsBedrock(h.Number) {
+			return headers[:i], headers[i:], nil
+		}
+	}
+	return headers, nil, nil
+}
+
 // splitHeaders splits the provided header batch into two parts according to
 // the configured ttd. It requires the parent of header batch along with its
 // td are stored correctly in chain. If ttd is not configured yet, all headers
 // will be treated legacy PoW headers.
 // Note, this function will not verify the header validity but just split them.
 func (beacon *Beacon) splitHeaders(chain consensus.ChainHeaderReader, headers []*types.Header) ([]*types.Header, []*types.Header, error) {
+	if chain.Config().Optimism != nil {
+		return beacon.splitBedrockHeaders(chain, headers)
+	}
 	// TTD is not defined yet, all headers should be in legacy format.
 	ttd := chain.Config().TerminalTotalDifficulty
 	if ttd == nil {
@@ -257,7 +274,7 @@ func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 		return consensus.ErrInvalidNumber
 	}
 	// Verify the header's EIP-1559 attributes.
-	if err := misc.VerifyEIP1559Header(chain.Config(), parent, header); err != nil {
+	if err := eip1559.VerifyEIP1559Header(chain.Config(), parent, header); err != nil {
 		return err
 	}
 	// Verify existence / non-existence of withdrawalsHash.
@@ -268,16 +285,22 @@ func (beacon *Beacon) verifyHeader(chain consensus.ChainHeaderReader, header, pa
 	if !shanghai && header.WithdrawalsHash != nil {
 		return fmt.Errorf("invalid withdrawalsHash: have %x, expected nil", header.WithdrawalsHash)
 	}
-	// Verify the existence / non-existence of excessDataGas
+	// Verify the existence / non-existence of cancun-specific header fields
 	cancun := chain.Config().IsCancun(header.Number, header.Time)
-	if !cancun && header.ExcessDataGas != nil {
-		return fmt.Errorf("invalid excessDataGas: have %d, expected nil", header.ExcessDataGas)
-	}
-	if !cancun && header.DataGasUsed != nil {
-		return fmt.Errorf("invalid dataGasUsed: have %d, expected nil", header.DataGasUsed)
-	}
-	if cancun {
-		if err := misc.VerifyEIP4844Header(parent, header); err != nil {
+	if !cancun {
+		switch {
+		case header.ExcessBlobGas != nil:
+			return fmt.Errorf("invalid excessBlobGas: have %d, expected nil", header.ExcessBlobGas)
+		case header.BlobGasUsed != nil:
+			return fmt.Errorf("invalid blobGasUsed: have %d, expected nil", header.BlobGasUsed)
+		case header.ParentBeaconRoot != nil:
+			return fmt.Errorf("invalid parentBeaconRoot, have %#x, expected nil", header.ParentBeaconRoot)
+		}
+	} else {
+		if header.ParentBeaconRoot == nil {
+			return errors.New("header is missing beaconRoot")
+		}
+		if err := eip4844.VerifyEIP4844Header(parent, header); err != nil {
 			return err
 		}
 	}
@@ -439,6 +462,10 @@ func (beacon *Beacon) InnerEngine() consensus.Engine {
 	return beacon.ethone
 }
 
+func (beacon *Beacon) SwapInner(inner consensus.Engine) {
+	beacon.ethone = inner
+}
+
 // SetThreads updates the mining threads. Delegate the call
 // to the eth1 engine if it's threaded.
 func (beacon *Beacon) SetThreads(threads int) {
@@ -454,8 +481,16 @@ func (beacon *Beacon) SetThreads(threads int) {
 // It depends on the parentHash already being stored in the database.
 // If the parentHash is not stored in the database a UnknownAncestor error is returned.
 func IsTTDReached(chain consensus.ChainHeaderReader, parentHash common.Hash, parentNumber uint64) (bool, error) {
+	if cfg := chain.Config(); cfg.Optimism != nil {
+		// If OP-Stack then bedrock activation number determines when TTD (eth Merge) has been reached.
+		// Note: some tests/utils will set parentNumber == max_uint64 as "parent" of the genesis block, this is fine.
+		return cfg.IsBedrock(new(big.Int).SetUint64(parentNumber + 1)), nil
+	}
 	if chain.Config().TerminalTotalDifficulty == nil {
 		return false, nil
+	}
+	if common.Big0.Cmp(chain.Config().TerminalTotalDifficulty) == 0 { // in case TTD is reached at genesis.
+		return true, nil
 	}
 	td := chain.GetTd(parentHash, parentNumber)
 	if td == nil {

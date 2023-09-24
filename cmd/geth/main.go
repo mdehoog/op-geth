@@ -39,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
+	"go.uber.org/automaxprocs/maxprocs"
 
 	// Force-load the tracer engines to trigger registration
 	_ "github.com/ethereum/go-ethereum/eth/tracers/js"
@@ -61,14 +62,19 @@ var (
 		utils.MinFreeDiskSpaceFlag,
 		utils.KeyStoreDirFlag,
 		utils.ExternalSignerFlag,
-		utils.NoUSBFlag,
+		utils.NoUSBFlag, // deprecated
 		utils.USBFlag,
 		utils.SmartCardDaemonPathFlag,
 		utils.OverrideCancun,
+		utils.OverrideVerkle,
+		utils.OverrideOptimismCanyon,
+		utils.OverrideOptimismEcotone,
+		utils.OverrideOptimismInterop,
 		utils.EnablePersonal,
 		utils.TxPoolLocalsFlag,
 		utils.TxPoolNoLocalsFlag,
 		utils.TxPoolJournalFlag,
+		utils.TxPoolJournalRemotesFlag,
 		utils.TxPoolRejournalFlag,
 		utils.TxPoolPriceLimitFlag,
 		utils.TxPoolPriceBumpFlag,
@@ -77,30 +83,32 @@ var (
 		utils.TxPoolAccountQueueFlag,
 		utils.TxPoolGlobalQueueFlag,
 		utils.TxPoolLifetimeFlag,
+		utils.BlobPoolDataDirFlag,
+		utils.BlobPoolDataCapFlag,
+		utils.BlobPoolPriceBumpFlag,
 		utils.SyncModeFlag,
 		utils.SyncTargetFlag,
 		utils.ExitWhenSyncedFlag,
 		utils.GCModeFlag,
 		utils.SnapshotFlag,
-		utils.TxLookupLimitFlag,
-		utils.LightServeFlag,
-		utils.LightIngressFlag,
-		utils.LightEgressFlag,
-		utils.LightMaxPeersFlag,
-		utils.LightNoPruneFlag,
+		utils.TxLookupLimitFlag, // deprecated
+		utils.TransactionHistoryFlag,
+		utils.StateHistoryFlag,
+		utils.LightServeFlag,    // deprecated
+		utils.LightIngressFlag,  // deprecated
+		utils.LightEgressFlag,   // deprecated
+		utils.LightMaxPeersFlag, // deprecated
+		utils.LightNoPruneFlag,  // deprecated
 		utils.LightKDFFlag,
-		utils.UltraLightServersFlag,
-		utils.UltraLightFractionFlag,
-		utils.UltraLightOnlyAnnounceFlag,
-		utils.LightNoSyncServeFlag,
+		utils.LightNoSyncServeFlag, // deprecated
 		utils.EthRequiredBlocksFlag,
-		utils.LegacyWhitelistFlag,
+		utils.LegacyWhitelistFlag, // deprecated
 		utils.BloomFilterSizeFlag,
 		utils.CacheFlag,
 		utils.CacheDatabaseFlag,
 		utils.CacheTrieFlag,
-		utils.CacheTrieJournalFlag,
-		utils.CacheTrieRejournalFlag,
+		utils.CacheTrieJournalFlag,   // deprecated
+		utils.CacheTrieRejournalFlag, // deprecated
 		utils.CacheGCFlag,
 		utils.CacheSnapshotFlag,
 		utils.CacheNoPrefetchFlag,
@@ -121,14 +129,16 @@ var (
 		utils.MinerNewPayloadTimeout,
 		utils.NATFlag,
 		utils.NoDiscoverFlag,
+		utils.DiscoveryV4Flag,
 		utils.DiscoveryV5Flag,
+		utils.LegacyDiscoveryV5Flag, // deprecated
 		utils.NetrestrictFlag,
 		utils.NodeKeyFileFlag,
 		utils.NodeKeyHexFlag,
 		utils.DNSDiscoveryFlag,
 		utils.DeveloperFlag,
-		utils.DeveloperPeriodFlag,
 		utils.DeveloperGasLimitFlag,
+		utils.DeveloperPeriodFlag,
 		utils.VMEnableDebugFlag,
 		utils.NetworkIdFlag,
 		utils.EthStatsURLFlag,
@@ -137,8 +147,18 @@ var (
 		utils.GpoPercentileFlag,
 		utils.GpoMaxGasPriceFlag,
 		utils.GpoIgnoreGasPriceFlag,
+		utils.GpoMinSuggestedPriorityFeeFlag,
+		utils.RollupSequencerHTTPFlag,
+		utils.RollupHistoricalRPCFlag,
+		utils.RollupHistoricalRPCTimeoutFlag,
+		utils.RollupDisableTxPoolGossipFlag,
+		utils.RollupComputePendingBlock,
+		utils.RollupHaltOnIncompatibleProtocolVersionFlag,
+		utils.RollupSuperchainUpgradesFlag,
 		configFileFlag,
-	}, utils.NetworkFlags, utils.DatabasePathFlags)
+		utils.LogDebugFlag,
+		utils.LogBacktraceAtFlag,
+	}, utils.NetworkFlags, utils.DatabaseFlags)
 
 	rpcFlags = []cli.Flag{
 		utils.HTTPEnabledFlag,
@@ -202,7 +222,6 @@ func init() {
 		importCommand,
 		exportCommand,
 		importPreimagesCommand,
-		exportPreimagesCommand,
 		removedbCommand,
 		dumpCommand,
 		dumpGenesisCommand,
@@ -228,6 +247,9 @@ func init() {
 		// See verkle.go
 		verkleCommand,
 	}
+	if logTestCommand != nil {
+		app.Commands = append(app.Commands, logTestCommand)
+	}
 	sort.Sort(cli.CommandsByName(app.Commands))
 
 	app.Flags = flags.Merge(
@@ -237,10 +259,16 @@ func init() {
 		debug.Flags,
 		metricsFlags,
 	)
+	flags.AutoEnvVars(app.Flags, "GETH")
 
 	app.Before = func(ctx *cli.Context) error {
+		maxprocs.Set() // Automatically set GOMAXPROCS to match Linux container CPU quota.
 		flags.MigrateGlobalFlags(ctx)
-		return debug.Setup(ctx)
+		if err := debug.Setup(ctx); err != nil {
+			return err
+		}
+		flags.CheckEnvVars(ctx, app.Flags, "GETH")
+		return nil
 	}
 	app.After = func(ctx *cli.Context) error {
 		debug.Exit()
@@ -267,6 +295,9 @@ func prepare(ctx *cli.Context) {
 	case ctx.IsSet(utils.SepoliaFlag.Name):
 		log.Info("Starting Geth on Sepolia testnet...")
 
+	case ctx.IsSet(utils.HoleskyFlag.Name):
+		log.Info("Starting Geth on Holesky testnet...")
+
 	case ctx.IsSet(utils.DeveloperFlag.Name):
 		log.Info("Starting Geth in ephemeral dev mode...")
 		log.Warn(`You are running Geth in --dev mode. Please note the following:
@@ -285,24 +316,30 @@ func prepare(ctx *cli.Context) {
      to 0, and discovery is disabled.
 `)
 
+	case ctx.IsSet(utils.OPNetworkFlag.Name):
+		log.Info("Starting geth on an OP network...", "network", ctx.String(utils.OPNetworkFlag.Name))
+
 	case !ctx.IsSet(utils.NetworkIdFlag.Name):
 		log.Info("Starting Geth on Ethereum mainnet...")
 	}
 	// If we're a full node on mainnet without --cache specified, bump default cache allowance
-	if ctx.String(utils.SyncModeFlag.Name) != "light" && !ctx.IsSet(utils.CacheFlag.Name) && !ctx.IsSet(utils.NetworkIdFlag.Name) {
+	if !ctx.IsSet(utils.CacheFlag.Name) && !ctx.IsSet(utils.NetworkIdFlag.Name) {
 		// Make sure we're not on any supported preconfigured testnet either
-		if !ctx.IsSet(utils.SepoliaFlag.Name) &&
+		if !ctx.IsSet(utils.HoleskyFlag.Name) &&
+			!ctx.IsSet(utils.SepoliaFlag.Name) &&
 			!ctx.IsSet(utils.GoerliFlag.Name) &&
 			!ctx.IsSet(utils.DeveloperFlag.Name) {
 			// Nope, we're really on mainnet. Bump that cache up!
+			// Note: If we don't set the OPNetworkFlag and have already initialized the database, we may hit this case.
 			log.Info("Bumping default cache on mainnet", "provided", ctx.Int(utils.CacheFlag.Name), "updated", 4096)
 			ctx.Set(utils.CacheFlag.Name, strconv.Itoa(4096))
 		}
-	}
-	// If we're running a light client on any network, drop the cache to some meaningfully low amount
-	if ctx.String(utils.SyncModeFlag.Name) == "light" && !ctx.IsSet(utils.CacheFlag.Name) {
-		log.Info("Dropping default light client cache", "provided", ctx.Int(utils.CacheFlag.Name), "updated", 128)
-		ctx.Set(utils.CacheFlag.Name, strconv.Itoa(128))
+	} else if ctx.String(utils.SyncModeFlag.Name) != "light" && !ctx.IsSet(utils.CacheFlag.Name) && ctx.IsSet(utils.OPNetworkFlag.Name) {
+		// We haven't set the cache, but may used the OP network flag we may be on an OP stack mainnet.
+		if strings.Contains(ctx.String(utils.OPNetworkFlag.Name), "mainnet") {
+			log.Info("Bumping default cache on mainnet", "provided", ctx.Int(utils.CacheFlag.Name), "updated", 4096, "network", ctx.String(utils.OPNetworkFlag.Name))
+			ctx.Set(utils.CacheFlag.Name, strconv.Itoa(4096))
+		}
 	}
 
 	// Start metrics export if enabled
@@ -407,7 +444,7 @@ func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isCon
 	}
 
 	// Start auxiliary services if enabled
-	if ctx.Bool(utils.MiningEnabledFlag.Name) || ctx.Bool(utils.DeveloperFlag.Name) {
+	if ctx.Bool(utils.MiningEnabledFlag.Name) {
 		// Mining only makes sense if a full Ethereum node is running
 		if ctx.String(utils.SyncModeFlag.Name) == "light" {
 			utils.Fatalf("Light clients do not support mining")

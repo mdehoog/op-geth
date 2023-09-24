@@ -18,23 +18,68 @@ package params
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 )
 
+// Version is the version of upstream geth
 const (
-	VersionMajor = 1          // Major version component of the current release
-	VersionMinor = 12         // Minor version component of the current release
-	VersionPatch = 1          // Patch version component of the current release
-	VersionMeta  = "unstable" // Version metadata to append to the version string
+	VersionMajor = 1        // Major version component of the current release
+	VersionMinor = 13       // Minor version component of the current release
+	VersionPatch = 8        // Patch version component of the current release
+	VersionMeta  = "stable" // Version metadata to append to the version string
 )
+
+// OPVersion is the version of op-geth
+var (
+	OPVersionMajor = 0          // Major version component of the current release
+	OPVersionMinor = 1          // Minor version component of the current release
+	OPVersionPatch = 0          // Patch version component of the current release
+	OPVersionMeta  = "unstable" // Version metadata to append to the version string
+)
+
+// This is set at build-time by the linker when the build is done by build/ci.go.
+var gitTag string
+
+// Override the version variables if the gitTag was set at build time.
+var _ = func() (_ string) {
+	semver := regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+)?$`)
+	version := semver.FindStringSubmatch(gitTag)
+	if version == nil {
+		return
+	}
+	if version[4] == "" {
+		version[4] = "stable"
+	}
+	OPVersionMajor, _ = strconv.Atoi(version[1])
+	OPVersionMinor, _ = strconv.Atoi(version[2])
+	OPVersionPatch, _ = strconv.Atoi(version[3])
+	OPVersionMeta = version[4]
+	return
+}()
 
 // Version holds the textual version string.
 var Version = func() string {
-	return fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	return fmt.Sprintf("%d.%d.%d", OPVersionMajor, OPVersionMinor, OPVersionPatch)
 }()
 
 // VersionWithMeta holds the textual version string including the metadata.
 var VersionWithMeta = func() string {
 	v := Version
+	if OPVersionMeta != "" {
+		v += "-" + OPVersionMeta
+	}
+	return v
+}()
+
+// GethVersion holds the textual geth version string.
+var GethVersion = func() string {
+	return fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+}()
+
+// GethVersionWithMeta holds the textual geth version string including the metadata.
+var GethVersionWithMeta = func() string {
+	v := GethVersion
 	if VersionMeta != "" {
 		v += "-" + VersionMeta
 	}
@@ -46,8 +91,8 @@ var VersionWithMeta = func() string {
 // releases.
 func ArchiveVersion(gitCommit string) string {
 	vsn := Version
-	if VersionMeta != "stable" {
-		vsn += "-" + VersionMeta
+	if OPVersionMeta != "stable" {
+		vsn += "-" + OPVersionMeta
 	}
 	if len(gitCommit) >= 8 {
 		vsn += "-" + gitCommit[:8]
@@ -60,7 +105,7 @@ func VersionWithCommit(gitCommit, gitDate string) string {
 	if len(gitCommit) >= 8 {
 		vsn += "-" + gitCommit[:8]
 	}
-	if (VersionMeta != "stable") && (gitDate != "") {
+	if (OPVersionMeta != "stable") && (gitDate != "") {
 		vsn += "-" + gitDate
 	}
 	return vsn

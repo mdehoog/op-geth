@@ -18,6 +18,7 @@
 package miner
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/downloader"
+	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -43,6 +45,10 @@ type Backend interface {
 	TxPool() *txpool.TxPool
 }
 
+type BackendWithHistoricalState interface {
+	StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, tracers.StateReleaseFunc, error)
+}
+
 // Config is the configuration parameters of mining.
 type Config struct {
 	Etherbase common.Address `toml:",omitempty"` // Public address for block mining rewards
@@ -53,6 +59,8 @@ type Config struct {
 	Recommit  time.Duration  // The time interval for miner to re-create mining work.
 
 	NewPayloadTimeout time.Duration // The maximum time allowance for creating a new payload
+
+	RollupComputePendingBlock bool // Compute the pending block from tx-pool, instead of copying the latest-block
 }
 
 // DefaultConfig contains default settings for miner.
