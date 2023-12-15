@@ -24,18 +24,13 @@ import (
 )
 
 type L1CostData struct {
-	zeroes, ones uint64
+	data []byte
 }
 
 func NewL1CostData(data []byte) (out L1CostData) {
-	for _, byte := range data {
-		if byte == 0 {
-			out.zeroes++
-		} else {
-			out.ones++
-		}
+	return L1CostData{
+		data: data,
 	}
-	return out
 }
 
 type StateGetter interface {
@@ -74,20 +69,108 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter, blockTime ui
 
 func newL1CostFunc(config *params.ChainConfig, l1BaseFee, overhead, scalar *big.Int, blockTime uint64) l1CostFunc {
 	isRegolith := config.IsRegolith(blockTime)
+	isEclipse := config.IsEclipse(blockTime)
 	return func(l1CostData L1CostData) (fee, gasUsed *big.Int) {
 		if config.Optimism == nil {
 			return nil, nil
 		}
-		gas := l1CostData.zeroes * params.TxDataZeroGas
-		if isRegolith {
-			gas += l1CostData.ones * params.TxDataNonZeroGasEIP2028
+
+		gas := uint64(0)
+		if isEclipse {
+			gas = uint64(FlzCompressLen(l1CostData.data)) * params.TxDataNonZeroGasEIP2028
 		} else {
-			gas += (l1CostData.ones + 68) * params.TxDataNonZeroGasEIP2028
+			zeroes := uint64(0)
+			ones := uint64(0)
+			for _, b := range l1CostData.data {
+				if b == 0 {
+					zeroes++
+				} else {
+					ones++
+				}
+			}
+			gas = zeroes * params.TxDataZeroGas
+			if isRegolith {
+				gas += ones * params.TxDataNonZeroGasEIP2028
+			} else {
+				gas += (ones + 68) * params.TxDataNonZeroGasEIP2028
+			}
 		}
+
 		l1GasUsed := new(big.Int).SetUint64(gas)
 		l1GasUsed = l1GasUsed.Add(l1GasUsed, overhead)
 		l1Cost := new(big.Int).Set(l1GasUsed)
 		l1Cost.Mul(l1GasUsed, l1BaseFee).Mul(l1Cost, scalar).Div(l1Cost, big.NewInt(1_000_000))
 		return l1Cost, l1GasUsed
 	}
+}
+
+// FlzCompressLen returns the length of the data after compression through FastLZ, based on
+// https://github.com/Vectorized/solady/blob/5315d937d79b335c668896d7533ac603adac5315/js/solady.js
+func FlzCompressLen(ib []byte) uint32 {
+	n := uint32(0)
+	b := uint32(len(ib)) - 4
+	ht := make([]uint32, 8192)
+	a := uint32(0)
+	i := uint32(2)
+	d := uint32(0)
+	r := uint32(0)
+	m := uint32(0xffffff)
+	u32 := func(i uint32) uint32 {
+		return uint32(ib[i]) | (uint32(ib[i+1]) << 8) | (uint32(ib[i+2]) << 16) | (uint32(ib[i+3]) << 24)
+	}
+	hash := func(x uint32) uint32 {
+		return ((2654435769 * x) >> 19) & 8191
+	}
+	literals := func(r uint32) {
+		n += 33 * (r / 32)
+		r %= 32
+		if r != 0 {
+			n += r + 1
+		}
+	}
+	for i < b-9 {
+		for {
+			s := u32(i) & m
+			h := hash(s)
+			r = ht[h]
+			ht[h] = i
+			d = i - r
+			c := m + 1
+			if d < 8192 {
+				c = u32(r) & m
+			}
+			if i >= b-9 {
+				break
+			}
+			i++
+			if s == c {
+				break
+			}
+		}
+		if i >= b-9 {
+			break
+		}
+		i--
+		if i > a {
+			literals(i - a)
+		}
+		l := uint32(3)
+		for l < b-i && ib[r+l] == ib[i+l] {
+			l++
+		}
+		i += l - 2
+		s := u32(i)
+		d--
+		n += 3 * (1 + (l-3)/262)
+		if l < 9 {
+			n--
+		}
+		ht[hash(s&m)] = i
+		i++
+		ht[hash(s>>8)] = i
+		i++
+		a = i
+	}
+	literals(b + 4 - a)
+	return n
 }
