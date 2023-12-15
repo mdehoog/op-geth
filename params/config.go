@@ -359,6 +359,7 @@ type ChainConfig struct {
 	RegolithTime *uint64  `json:"regolithTime,omitempty"` // Regolith switch time (nil = no fork, 0 = already on optimism regolith)
 	CanyonTime   *uint64  `json:"canyonTime,omitempty"`   // Canyon switch time (nil = no fork, 0 = already on optimism canyon)
 	// Delta: the Delta upgrade does not affect the execution-layer, and is thus not configurable in the chain config.
+	EclipseTime *uint64 `json:"eclipseTime,omitempty"` // Eclipse switch time (nil = no fork, 0 = already on optimism eclipse)
 
 	InteropTime *uint64 `json:"interopTime,omitempty"` // Interop switch time (nil = no fork, 0 = already on optimism interop)
 
@@ -627,6 +628,10 @@ func (c *ChainConfig) IsCanyon(time uint64) bool {
 	return isTimestampForked(c.CanyonTime, time)
 }
 
+func (c *ChainConfig) IsEclipse(time uint64) bool {
+	return isTimestampForked(c.EclipseTime, time)
+}
+
 func (c *ChainConfig) IsInterop(time uint64) bool {
 	return isTimestampForked(c.InteropTime, time)
 }
@@ -644,8 +649,13 @@ func (c *ChainConfig) IsOptimismBedrock(num *big.Int) bool {
 func (c *ChainConfig) IsOptimismRegolith(time uint64) bool {
 	return c.IsOptimism() && c.IsRegolith(time)
 }
+
 func (c *ChainConfig) IsOptimismCanyon(time uint64) bool {
 	return c.IsOptimism() && c.IsCanyon(time)
+}
+
+func (c *ChainConfig) IsOptimismEclipse(time uint64) bool {
+	return c.IsOptimism() && c.IsEclipse(time)
 }
 
 // IsOptimismPreBedrock returns true iff this is an optimism node & bedrock is not yet active

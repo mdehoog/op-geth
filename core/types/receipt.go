@@ -577,15 +577,14 @@ func (rs Receipts) DeriveFields(config *params.ChainConfig, hash common.Hash, nu
 			fscalar := new(big.Float).SetInt(scalar)                  // legacy: format fee scalar as big Float
 			fdivisor := new(big.Float).SetUint64(1_000_000)           // 10**6, i.e. 6 decimals
 			feeScalar := new(big.Float).Quo(fscalar, fdivisor)
+			l1CostFunc := newL1CostFunc(config, l1Basefee, overhead, scalar, time)
 			for i := 0; i < len(rs); i++ {
-				if !txs[i].IsDepositTx() {
-					gas := txs[i].RollupDataGas().DataGas(time, config)
-					rs[i].L1GasPrice = l1Basefee
-					// GasUsed reported in receipt should include the overhead
-					rs[i].L1GasUsed = new(big.Int).Add(new(big.Int).SetUint64(gas), overhead)
-					rs[i].L1Fee = L1Cost(gas, l1Basefee, overhead, scalar)
-					rs[i].FeeScalar = feeScalar
+				if txs[i].IsDepositTx() {
+					continue
 				}
+				rs[i].L1GasPrice = l1Basefee
+				rs[i].L1Fee, rs[i].L1GasUsed = l1CostFunc(txs[i].L1CostData())
+				rs[i].FeeScalar = feeScalar
 			}
 		} else {
 			return fmt.Errorf("L1 info tx only has %d bytes, cannot read gas price parameters", len(data))

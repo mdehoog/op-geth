@@ -23,27 +23,32 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
-type RollupGasData struct {
-	Zeroes, Ones uint64
+type L1CostData struct {
+	zeroes, ones uint64
 }
 
-func (r RollupGasData) DataGas(time uint64, cfg *params.ChainConfig) (gas uint64) {
-	gas = r.Zeroes * params.TxDataZeroGas
-	if cfg.IsRegolith(time) {
-		gas += r.Ones * params.TxDataNonZeroGasEIP2028
-	} else {
-		gas += (r.Ones + 68) * params.TxDataNonZeroGasEIP2028
+func NewL1CostData(data []byte) (out L1CostData) {
+	for _, byte := range data {
+		if byte == 0 {
+			out.zeroes++
+		} else {
+			out.ones++
+		}
 	}
-	return gas
+	return out
 }
 
 type StateGetter interface {
 	GetState(common.Address, common.Hash) common.Hash
 }
 
-// L1CostFunc is used in the state transition to determine the cost of a rollup message.
-// Returns nil if there is no cost.
-type L1CostFunc func(blockNum uint64, blockTime uint64, dataGas RollupGasData, isDepositTx bool) *big.Int
+// L1CostFunc is used in the state transition to determine the L1 data fee charged to the sender of
+// the transaction.
+type L1CostFunc func(tx L1CostData) *big.Int
+
+// l1CostFunc is an internal version of L1CostFunc that also returns the gasUsed for use
+// in receipts.
+type l1CostFunc func(tx L1CostData) (fee, gasUsed *big.Int)
 
 var (
 	L1BaseFeeSlot = common.BigToHash(big.NewInt(1))
@@ -53,31 +58,36 @@ var (
 
 var L1BlockAddr = common.HexToAddress("0x4200000000000000000000000000000000000015")
 
-// NewL1CostFunc returns a function used for calculating L1 fee cost.
-// This depends on the oracles because gas costs can change over time.
-// It returns nil if there is no applicable cost function.
-func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
-	cacheBlockNum := ^uint64(0)
-	var l1BaseFee, overhead, scalar *big.Int
-	return func(blockNum uint64, blockTime uint64, dataGas RollupGasData, isDepositTx bool) *big.Int {
-		rollupDataGas := dataGas.DataGas(blockTime, config) // Only fake txs for RPC view-calls are 0.
-		if config.Optimism == nil || isDepositTx || rollupDataGas == 0 {
-			return nil
-		}
-		if blockNum != cacheBlockNum {
-			l1BaseFee = statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
-			overhead = statedb.GetState(L1BlockAddr, OverheadSlot).Big()
-			scalar = statedb.GetState(L1BlockAddr, ScalarSlot).Big()
-			cacheBlockNum = blockNum
-		}
-		return L1Cost(rollupDataGas, l1BaseFee, overhead, scalar)
+// NewL1CostFunc returns a function used for calculating L1 fee cost.  This depends on the oracles
+// because gas costs can change over time, and depends on blockTime since the specific function
+// used to compute the fee can differ between hardforks.
+func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter, blockTime uint64) L1CostFunc {
+	l1BaseFee := statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
+	overhead := statedb.GetState(L1BlockAddr, OverheadSlot).Big()
+	scalar := statedb.GetState(L1BlockAddr, ScalarSlot).Big()
+	f := newL1CostFunc(config, l1BaseFee, overhead, scalar, blockTime)
+	return func(l1CostData L1CostData) *big.Int {
+		fee, _ := f(l1CostData)
+		return fee
 	}
 }
 
-func L1Cost(rollupDataGas uint64, l1BaseFee, overhead, scalar *big.Int) *big.Int {
-	l1GasUsed := new(big.Int).SetUint64(rollupDataGas)
-	l1GasUsed = l1GasUsed.Add(l1GasUsed, overhead)
-	l1Cost := l1GasUsed.Mul(l1GasUsed, l1BaseFee)
-	l1Cost = l1Cost.Mul(l1Cost, scalar)
-	return l1Cost.Div(l1Cost, big.NewInt(1_000_000))
+func newL1CostFunc(config *params.ChainConfig, l1BaseFee, overhead, scalar *big.Int, blockTime uint64) l1CostFunc {
+	isRegolith := config.IsRegolith(blockTime)
+	return func(l1CostData L1CostData) (fee, gasUsed *big.Int) {
+		if config.Optimism == nil {
+			return nil, nil
+		}
+		gas := l1CostData.zeroes * params.TxDataZeroGas
+		if isRegolith {
+			gas += l1CostData.ones * params.TxDataNonZeroGasEIP2028
+		} else {
+			gas += (l1CostData.ones + 68) * params.TxDataNonZeroGasEIP2028
+		}
+		l1GasUsed := new(big.Int).SetUint64(gas)
+		l1GasUsed = l1GasUsed.Add(l1GasUsed, overhead)
+		l1Cost := new(big.Int).Set(l1GasUsed)
+		l1Cost.Mul(l1GasUsed, l1BaseFee).Mul(l1Cost, scalar).Div(l1Cost, big.NewInt(1_000_000))
+		return l1Cost, l1GasUsed
+	}
 }
