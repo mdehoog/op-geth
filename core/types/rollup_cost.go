@@ -35,18 +35,11 @@ const (
 	// stored as big-endian format in bytes [24:32) of the slot.
 	BlobBaseFeeScalarSlotOffset = 8  // bytes [20:24) of the slot
 	BaseFeeScalarSlotOffset     = 12 // bytes [16:20) of the slot
-	CostTxSizeCoefSlotOffset    = 16 // bytes [12:16) of the slot
-	CostFastlzCoefSlotOffset    = 20 // bytes [8:12) of the slot
-	CostInterceptSlotOffset     = 24 // bytes [4:8) of the slot
 
 	// scalarSectionStart is the beginning of the scalar values segment in the slot
 	// array. baseFeeScalar is in the first four bytes of the segment, blobBaseFeeScalar the next
 	// four.
 	scalarSectionStart = 32 - BaseFeeScalarSlotOffset - 4
-
-	// fjordSectionStart marks the position of the segment containing fee calculation values within the slot array.
-	// It initiates with costIntercept and is succeeded by costFastlzCoef, and costTxSizeCoef (in reverse order).
-	fjordSectionStart = 32 - CostInterceptSlotOffset - 4
 )
 
 func init() {
@@ -61,7 +54,7 @@ var (
 	BedrockL1AttributesSelector = []byte{0x01, 0x5d, 0x8e, 0xb9}
 	// EcotoneL1AttributesSelector is the selector indicating Ecotone style L1 gas attributes.
 	EcotoneL1AttributesSelector = []byte{0x44, 0x0a, 0x5e, 0x20}
-	// FjordL1AttributesSelector is the selector indicating Ecotone style L1 gas attributes.
+	// FjordL1AttributesSelector is the selector indicating Fjord style L1 gas attributes.
 	FjordL1AttributesSelector = []byte{0x85, 0x0c, 0x16, 0xd8}
 
 	// L1BlockAddr is the address of the L1Block contract which stores the L1 gas attributes.
@@ -74,21 +67,22 @@ var (
 	// L1BlobBaseFeeSlot was added with the Ecotone upgrade and stores the blobBaseFee L1 gas
 	// attribute.
 	L1BlobBaseFeeSlot = common.BigToHash(big.NewInt(7))
-	// L1FeeParamsSlot:
-	//   - Following the Ecotone upgrade, it stores the 32-bit basefeeScalar and blobBaseFeeScalar L1 gas attributes
-	//     at offsets `BaseFeeScalarSlotOffset` and `BlobBaseFeeScalarSlotOffset` respectively.
-	//   - After the Fjord upgrade, in addition to the above fee scalars, it also accommodates the storage
-	//     of costIntercept, costFastlzCoef, and txSizeCoef, each 32-bit, stored at offsets
-	//     `CostInterceptSlotOffset`, `CostFastlzCoefSlotOffset`, and `CostTxSizeCoefSlotOffset` respectively.
-	L1FeeParamsSlot = common.BigToHash(big.NewInt(3))
+	// L1FeeScalarsSlot as of the Ecotone upgrade stores the 32-bit basefeeScalar and
+	// blobBaseFeeScalar L1 gas attributes at offsets `BaseFeeScalarSlotOffset` and
+	// `BlobBaseFeeScalarSlotOffset` respectively.
+	L1FeeScalarsSlot = common.BigToHash(big.NewInt(3))
 
 	oneMillion     = big.NewInt(1_000_000)
 	ecotoneDivisor = big.NewInt(1_000_000 * 16)
 	fjordDivisor   = big.NewInt(1_000_000_000_000)
 	sixteen        = big.NewInt(16)
 
-	emptyScalars    = make([]byte, 8)
-	emptyCostValues = make([]byte, 12)
+	// TODO(ytu): Add spec link once spec is merged
+	l1CostIntercept  = big.NewInt(-27_321_890)
+	l1CostFastlzCoef = big.NewInt(1_031_462)
+	l1CostTxSizeCoef = big.NewInt(-88_664)
+
+	emptyScalars = make([]byte, 8)
 )
 
 // RollupCostData is a transaction structure that caches data for quickly computing the data
@@ -134,18 +128,15 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
 		// Note: the various state variables below are not initialized from the DB until this
 		// point to allow deposit transactions from the block to be processed first by state
 		// transition.  This behavior is consensus critical!
-		l1FeeParams := statedb.GetState(L1BlockAddr, L1FeeParamsSlot).Bytes()
+		l1FeeScalars := statedb.GetState(L1BlockAddr, L1FeeScalarsSlot).Bytes()
 		l1BlobBaseFee := statedb.GetState(L1BlockAddr, L1BlobBaseFeeSlot).Big()
 		l1BaseFee := statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
 		if config.IsOptimismFjord(blockTime) {
 			// Edge case: the very first Fjord block requires we use the Ecotone cost
-			// function. We detect this scenario by checking if the Fjord parameters are
-			// unset. Note here we rely on assumption that the cost func parameters are adjacent
-			// in the buffer and costTxSizeCoef comes first.
-			firstFjordBlock := bytes.Equal(emptyCostValues, l1FeeParams[fjordSectionStart:fjordSectionStart+12])
+			// function. We detect this scenario by ???
+			firstFjordBlock := false
 			if !firstFjordBlock {
-				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeParams)
-				l1CostIntercept, l1CostFastlzCoef, l1CostTxSizeCoef := extractFjordFeeParams(l1FeeParams)
+				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeScalars)
 				return newL1CostFuncFjord(
 					l1BaseFee,
 					l1BlobBaseFee,
@@ -158,15 +149,15 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
 			}
 			log.Info("using Ecotone l1 cost func for first Fjord block", "time", blockTime)
 		}
-		if config.IsOptimismEcotone(blockTime) {
+		if config.IsOptimismFjord(blockTime) || config.IsOptimismEcotone(blockTime) {
 			// Edge case: the very first Ecotone block requires we use the Bedrock cost
 			// function. We detect this scenario by checking if the Ecotone parameters are
 			// unset. Note here we rely on assumption that the scalar parameters are adjacent
 			// in the buffer and l1BaseFeeScalar comes first.
 			firstEcotoneBlock := l1BlobBaseFee.BitLen() == 0 &&
-				bytes.Equal(emptyScalars, l1FeeParams[scalarSectionStart:scalarSectionStart+8])
+				bytes.Equal(emptyScalars, l1FeeScalars[scalarSectionStart:scalarSectionStart+8])
 			if !firstEcotoneBlock {
-				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeParams)
+				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeScalars)
 				return newL1CostFuncEcotone(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseFeeScalar)
 			}
 			log.Info("using bedrock l1 cost func for first Ecotone block", "time", blockTime)
@@ -354,7 +345,7 @@ func extractL1GasParamsFjord(data []byte) (l1BaseFee *big.Int, costFunc l1CostFu
 	if len(data) != 176 {
 		return nil, nil, fmt.Errorf("expected 176 L1 info bytes, got %d", len(data))
 	}
-	// data layout assumed for Ecotone:
+	// data layout assumed for Fjord:
 	// offset type varname
 	// 0     <selector>
 	// 4     uint32 _basefeeScalar
@@ -366,16 +357,10 @@ func extractL1GasParamsFjord(data []byte) (l1BaseFee *big.Int, costFunc l1CostFu
 	// 68    uint256 _blobBaseFee,
 	// 100   bytes32 _hash,
 	// 132   bytes32 _batcherHash,
-	// 164   int32 _l1CostIntercept,
-	// 168   int32 _l1CostFastlzCoef,
-	// 172   int32 _l1CostTxSizeCoef,
 	l1BaseFee = new(big.Int).SetBytes(data[36:68])
 	l1BlobBaseFee := new(big.Int).SetBytes(data[68:100])
 	l1BaseFeeScalar := new(big.Int).SetBytes(data[4:8])
 	l1BlobBaseFeeScalar := new(big.Int).SetBytes(data[8:12])
-	l1CostIntercept := big.NewInt(int64(bytesToInt32(data, 164, 4)))
-	l1CostFastlzCoef := big.NewInt(int64(bytesToInt32(data, 168, 4)))
-	l1CostTxSizeCoef := big.NewInt(int64(bytesToInt32(data, 172, 4)))
 	costFunc = newL1CostFuncFjord(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseFeeScalar, l1CostIntercept, l1CostFastlzCoef, l1CostTxSizeCoef)
 	return
 }
@@ -398,14 +383,6 @@ func extractEcotoneFeeParams(l1FeeParams []byte) (l1BaseFeeScalar, l1BlobBaseFee
 	offset := scalarSectionStart
 	l1BaseFeeScalar = new(big.Int).SetBytes(l1FeeParams[offset : offset+4])
 	l1BlobBaseFeeScalar = new(big.Int).SetBytes(l1FeeParams[offset+4 : offset+8])
-	return
-}
-
-func extractFjordFeeParams(l1FeeParams []byte) (l1CostIntercept, l1CostFastlzCoef, l1CostTxSizeCoef *big.Int) {
-	offset := fjordSectionStart
-	l1CostIntercept = big.NewInt(int64(bytesToInt32(l1FeeParams, offset, offset+4)))
-	l1CostFastlzCoef = big.NewInt(int64(bytesToInt32(l1FeeParams, offset+4, offset+8)))
-	l1CostTxSizeCoef = big.NewInt(int64(bytesToInt32(l1FeeParams, offset+8, offset+12)))
 	return
 }
 
