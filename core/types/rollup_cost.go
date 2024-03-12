@@ -129,22 +129,16 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
 		l1BlobBaseFee := statedb.GetState(L1BlockAddr, L1BlobBaseFeeSlot).Big()
 		l1BaseFee := statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
 		if config.IsOptimismFjord(blockTime) {
-			// Edge case: the very first Fjord block requires we use the Ecotone cost
-			// function. We detect this scenario by checking this block time is within
-			// the range of the first Fjord block
-			if !config.IsOptimismFjordActivationBlock(blockTime) {
-				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeScalars)
-				return newL1CostFuncFjord(
-					l1BaseFee,
-					l1BlobBaseFee,
-					l1BaseFeeScalar,
-					l1BlobBaseFeeScalar,
-					l1CostIntercept,
-					l1CostFastlzCoef,
-					l1CostTxSizeCoef,
-				)
-			}
-			log.Info("using Ecotone l1 cost func for first Fjord block", "time", blockTime)
+			l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeScalars)
+			return newL1CostFuncFjord(
+				l1BaseFee,
+				l1BlobBaseFee,
+				l1BaseFeeScalar,
+				l1BlobBaseFeeScalar,
+				l1CostIntercept,
+				l1CostFastlzCoef,
+				l1CostTxSizeCoef,
+			)
 		}
 		if config.IsOptimismEcotone(blockTime) {
 			// Edge case: the very first Ecotone block requires we use the Bedrock cost

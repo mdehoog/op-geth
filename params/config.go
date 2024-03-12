@@ -378,9 +378,6 @@ type ChainConfig struct {
 
 	// Optimism config, nil if not active
 	Optimism *OptimismConfig `json:"optimism,omitempty"`
-
-	// Seconds per L2 block
-	BlockTime *uint64 `json:"blockTime,omitempty"`
 }
 
 // EthashConfig is the consensus engine configs for proof-of-work based sealing.
@@ -672,16 +669,6 @@ func (c *ChainConfig) IsOptimismEcotone(time uint64) bool {
 
 func (c *ChainConfig) IsOptimismFjord(time uint64) bool {
 	return c.IsOptimism() && c.IsFjord(time)
-}
-
-// IsOptimismFjordActivationBlock returns whether the specified block is the first block
-// subject to the Fjord upgrade. Fjord activation at genesis does not count.
-func (c *ChainConfig) IsOptimismFjordActivationBlock(time uint64) bool {
-	return c.IsOptimism() &&
-		c.IsFjord(time) &&
-		c.BlockTime != nil &&
-		(time-*c.BlockTime) > 0 &&
-		!c.IsFjord(time-*c.BlockTime)
 }
 
 // IsOptimismPreBedrock returns true iff this is an optimism node & bedrock is not yet active

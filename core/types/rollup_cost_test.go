@@ -159,31 +159,6 @@ func TestFirstBlockEcotoneGasParams(t *testing.T) {
 	require.Equal(t, regolithFee, c)
 }
 
-// make sure the first block of the fjord upgrade is properly detected, and
-// invokes the Ecotone cost function appropriately.
-func TestFirstBlockFjordGasParams(t *testing.T) {
-	zeroTime := uint64(0)
-	fjordTime := uint64(10)
-	blockTime := uint64(2)
-	// create a config where ecotone upgrade is active
-	config := &params.ChainConfig{
-		Optimism:     params.OptimismTestConfig.Optimism,
-		RegolithTime: &zeroTime,
-		EcotoneTime:  &zeroTime,
-		FjordTime:    &fjordTime,
-		BlockTime:    &blockTime,
-	}
-	require.True(t, config.IsOptimismEcotone(zeroTime))
-
-	data := getEcotoneL1Attributes(baseFee, blobBaseFee, baseFeeScalar, blobBaseFeeScalar)
-
-	_, oldCostFunc, _, err := extractL1GasParams(config, fjordTime, data)
-	require.NoError(t, err)
-	c, g := oldCostFunc(emptyTx.RollupCostData())
-	require.Equal(t, ecotoneGas, g)
-	require.Equal(t, ecotoneFee, c)
-}
-
 func getBedrockL1Attributes(baseFee, overhead, scalar *big.Int) []byte {
 	uint256 := make([]byte, 32)
 	ignored := big.NewInt(1234)
@@ -250,11 +225,9 @@ func (sg *testStateGetter) GetState(addr common.Address, slot common.Hash) commo
 // configuration and statedb values.
 func TestNewL1CostFunc(t *testing.T) {
 	time := uint64(10)
-	blockTime := uint64(2)
 	timeInFuture := uint64(20)
 	config := &params.ChainConfig{
-		Optimism:  params.OptimismTestConfig.Optimism,
-		BlockTime: &blockTime,
+		Optimism: params.OptimismTestConfig.Optimism,
 	}
 	statedb := &testStateGetter{
 		baseFee:           baseFee,
@@ -295,15 +268,9 @@ func TestNewL1CostFunc(t *testing.T) {
 	// emptyTx fee w/ fjord config should be the fjord fee
 	config.FjordTime = &time
 	costFunc = NewL1CostFunc(config, statedb)
-	fee = costFunc(emptyTx.RollupCostData(), time+*config.BlockTime)
-	require.NotNil(t, fee)
-	require.Equal(t, fjordFee, fee)
-
-	// emptyTx fee w/ fjord config, but simulate first fjord block. Should result in Ecotone fee.
-	costFunc = NewL1CostFunc(config, statedb)
 	fee = costFunc(emptyTx.RollupCostData(), time)
 	require.NotNil(t, fee)
-	require.Equal(t, ecotoneFee, fee)
+	require.Equal(t, fjordFee, fee)
 
 	// emptyTx fee w/ ecotone config, but simulate first ecotone block by blowing away the ecotone
 	// params. Should result in regolith fee.
