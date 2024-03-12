@@ -130,7 +130,8 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
 		l1BaseFee := statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
 		if config.IsOptimismFjord(blockTime) {
 			// Edge case: the very first Fjord block requires we use the Ecotone cost
-			// function. We detect this scenario by ???
+			// function. We detect this scenario by checking this block time is within
+			// the range of the first Fjord block
 			if !config.IsOptimismFjordActivationBlock(blockTime) {
 				l1BaseFeeScalar, l1BlobBaseFeeScalar := extractEcotoneFeeParams(l1FeeScalars)
 				return newL1CostFuncFjord(
@@ -278,7 +279,7 @@ func newL1CostFuncFjord(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseFee
 // extractL1GasParams extracts the gas parameters necessary to compute gas costs from L1 block info
 func extractL1GasParams(config *params.ChainConfig, time uint64, data []byte) (l1BaseFee *big.Int, costFunc l1CostFunc, feeScalar *big.Float, err error) {
 	// Both Ecotone and Fjord use the same function selector
-	if config.IsEcotone(time) || config.IsFjord(time) {
+	if config.IsEcotone(time) {
 		// edge case: for the very first Ecotone block we still need to use the Bedrock
 		// function. We detect this edge case by seeing if the function selector is the old one
 		if len(data) >= 4 && !bytes.Equal(data[0:4], BedrockL1AttributesSelector) {

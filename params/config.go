@@ -680,6 +680,7 @@ func (c *ChainConfig) IsOptimismFjordActivationBlock(time uint64) bool {
 	return c.IsOptimism() &&
 		c.IsFjord(time) &&
 		c.BlockTime != nil &&
+		(time-*c.BlockTime) > 0 &&
 		!c.IsFjord(time-*c.BlockTime)
 }
 
