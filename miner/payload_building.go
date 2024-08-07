@@ -133,7 +133,7 @@ func (payload *Payload) update(r *newPayloadResult, elapsed time.Duration) {
 		log.Debug("Ignoring interrupted payload update", "id", payload.id)
 		return
 	} else if r.err != nil {
-		log.Warn("Error building payload update", "id", payload.id, "err", r.err)
+		//log.Warn("Error building payload update", "id", payload.id, "err", r.err)
 		payload.err = r.err // record latest error
 		return
 	}

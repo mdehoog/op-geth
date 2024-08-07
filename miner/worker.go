@@ -135,7 +135,7 @@ func (miner *Miner) generateWork(params *generateParams) *newPayloadResult {
 		err := miner.fillTransactions(interrupt, work)
 		timer.Stop() // don't need timeout interruption any more
 		if errors.Is(err, errBlockInterruptedByTimeout) {
-			log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(miner.config.Recommit))
+			//log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(miner.config.Recommit))
 		} else if errors.Is(err, errBlockInterruptedByResolve) {
 			log.Info("Block building got interrupted by payload resolution")
 		}
@@ -237,7 +237,7 @@ func (miner *Miner) prepareWork(genParams *generateParams) (*environment, error)
 	// since clique algorithm can modify the coinbase field in header.
 	env, err := miner.makeEnv(parent, header, genParams.coinbase)
 	if err != nil {
-		log.Error("Failed to create sealing context", "err", err)
+		//log.Error("Failed to create sealing context", "err", err)
 		return nil, err
 	}
 	if header.ParentBeaconRoot != nil {
