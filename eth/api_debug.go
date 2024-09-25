@@ -26,7 +26,9 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
@@ -85,6 +87,26 @@ func (api *DebugAPI) DumpBlock(blockNr rpc.BlockNumber) (state.Dump, error) {
 		return state.Dump{}, err
 	}
 	return stateDb.RawDump(opts), nil
+}
+
+func (api *DebugAPI) ExecutionWitness(blockNr rpc.BlockNumber) (*stateless.Witness, error) {
+	witness := &stateless.Witness{}
+
+	block := api.eth.blockchain.GetBlockByNumber(uint64(blockNr))
+	if block == nil {
+		return nil, fmt.Errorf("block #%d not found", blockNr)
+	}
+	statedb, err := api.eth.blockchain.StateAt(block.ParentHash())
+	if err != nil {
+		return nil, err
+	}
+	statedb.StartPrefetcher("debug_execution_witness", witness)
+
+	if _, err = api.eth.blockchain.Processor().Process(block, statedb, vm.Config{}); err != nil {
+		return nil, err
+	}
+
+	return witness, nil
 }
 
 // Preimage is a debug API function that returns the preimage for a sha3 hash, if known.
