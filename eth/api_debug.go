@@ -98,12 +98,12 @@ func (api *DebugAPI) ExecutionWitness(blockNr rpc.BlockNumber) (*stateless.Witne
 	}
 	statedb, err := api.eth.blockchain.StateAt(block.ParentHash())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to retrieve parent state: %v", err)
 	}
 	statedb.StartPrefetcher("debug_execution_witness", witness)
 
 	if _, err = api.eth.blockchain.Processor().Process(block, statedb, vm.Config{}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to process block %d: %v", block.Number(), err)
 	}
 
 	return witness, nil
