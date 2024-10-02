@@ -90,8 +90,6 @@ func (api *DebugAPI) DumpBlock(blockNr rpc.BlockNumber) (state.Dump, error) {
 }
 
 func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*stateless.Witness, error) {
-	witness := &stateless.Witness{}
-
 	block, err := api.eth.APIBackend.BlockByNumberOrHash(ctx, blockNrOrHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve block: %w", err)
@@ -99,12 +97,19 @@ func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.Blo
 	if block == nil {
 		return nil, fmt.Errorf("block not found: %s", blockNrOrHash.String())
 	}
-	statedb, err := api.eth.blockchain.StateAt(block.ParentHash())
+
+	witness, err := stateless.NewWitness(block.Header(), api.eth.blockchain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create witness: %w", err)
+	}
+
+	parentHeader := witness.Headers[0]
+	statedb, err := api.eth.blockchain.StateAt(parentHeader.Root)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve parent state: %w", err)
 	}
-	statedb.StartPrefetcher("debug_execution_witness", witness)
 
+	statedb.StartPrefetcher("debug_execution_witness", witness)
 	if _, err = api.eth.blockchain.Processor().Process(block, statedb, vm.Config{}); err != nil {
 		return nil, fmt.Errorf("failed to process block %d: %w", block.Number(), err)
 	}
