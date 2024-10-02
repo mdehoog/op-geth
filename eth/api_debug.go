@@ -110,8 +110,13 @@ func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.Blo
 	}
 
 	statedb.StartPrefetcher("debug_execution_witness", witness)
-	if _, err = api.eth.blockchain.Processor().Process(block, statedb, vm.Config{}); err != nil {
+	res, err := api.eth.blockchain.Processor().Process(block, statedb, vm.Config{})
+	if err != nil {
 		return nil, fmt.Errorf("failed to process block %d: %w", block.Number(), err)
+	}
+
+	if err := api.eth.blockchain.Validator().ValidateState(block, statedb, res, false); err != nil {
+		return nil, fmt.Errorf("failed to validate block %d: %w", block.Number(), err)
 	}
 
 	return witness, nil
