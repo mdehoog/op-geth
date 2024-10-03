@@ -17,6 +17,7 @@
 package eth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
@@ -89,7 +89,7 @@ func (api *DebugAPI) DumpBlock(blockNr rpc.BlockNumber) (state.Dump, error) {
 	return stateDb.RawDump(opts), nil
 }
 
-func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*stateless.Witness, error) {
+func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	block, err := api.eth.APIBackend.BlockByNumberOrHash(ctx, blockNrOrHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve block: %w", err)
@@ -110,7 +110,8 @@ func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.Blo
 	}
 
 	statedb.StartPrefetcher("debug_execution_witness", witness)
-	res, err := api.eth.blockchain.Processor().Process(block, statedb, vm.Config{})
+
+	res, err := api.eth.blockchain.Processor().Process(block, statedb, *api.eth.blockchain.GetVMConfig())
 	if err != nil {
 		return nil, fmt.Errorf("failed to process block %d: %w", block.Number(), err)
 	}
@@ -119,7 +120,11 @@ func (api *DebugAPI) ExecutionWitness(ctx context.Context, blockNrOrHash rpc.Blo
 		return nil, fmt.Errorf("failed to validate block %d: %w", block.Number(), err)
 	}
 
-	return witness, nil
+	var buf bytes.Buffer
+	if err = witness.EncodeRLP(&buf); err != nil {
+		return nil, fmt.Errorf("failed to encode witness: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // Preimage is a debug API function that returns the preimage for a sha3 hash, if known.
