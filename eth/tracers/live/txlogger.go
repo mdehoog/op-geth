@@ -77,7 +77,7 @@ func (t *txlogger) OnFault(pc uint64, op byte, gas, cost uint64, _ tracing.OpCon
 
 func (t *txlogger) OnTxStart(vm *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	t.start = time.Now()
-	if t.start.Unix()-int64(vm.Time) > int64(t.config.MaxAge) {
+	if t.config.MaxAge > 0 && t.start.Unix()-int64(vm.Time) > int64(t.config.MaxAge) {
 		// transaction is too old, skip
 		t.tx = nil
 		return
