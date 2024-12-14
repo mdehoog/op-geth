@@ -2208,6 +2208,19 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 	return SubmitTransaction(ctx, api.b, tx)
 }
 
+// SendRawTransactionPermissioned is a version of SendRawTransaction that allows for
+// a permissioned set of addresses allowed to deploy smart contracts.
+func (api *TransactionAPI) SendRawTransactionPermissioned(ctx context.Context, input hexutil.Bytes, allowedCreators []common.Address) (common.Hash, error) {
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(input); err != nil {
+		return common.Hash{}, err
+	}
+	if err := api.canSend(ctx, tx, allowedCreators); err != nil {
+		return common.Hash{}, err
+	}
+	return SubmitTransaction(ctx, api.b, tx)
+}
+
 // Sign calculates an ECDSA signature for:
 // keccak256("\x19Ethereum Signed Message:\n" + len(message) + message).
 //
